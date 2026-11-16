@@ -257,4 +257,96 @@ class UserAuthController extends Controller
             'sim_verified' => true,
         ]);
     }
+
+    public function login(Request $request): JsonResponse
+    {
+        $rawPhone = trim((string) ($request->input('phone') ?? ''));
+        $digits = preg_replace('/\D/', '', $rawPhone);
+        if (strlen($digits) > 10) {
+            $digits = substr($digits, -10);
+        }
+
+        if (strlen($digits) !== 10) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Please enter a valid 10-digit mobile number.',
+            ], 400);
+        }
+
+        $user = User::findByPhone($digits);
+
+        if (!$user || empty(trim($user->name))) {
+            return response()->json([
+                'status' => 'error',
+                'is_registered' => false,
+                'message' => 'Wrong mobile number: This number is not registered on this device or database. Please register first.',
+            ], 404);
+        }
+
+        $token = 'sanctum_token_'.base64_encode($digits.':'.((int) (microtime(true) * 1000)));
+
+        return response()->json([
+            'status' => 'success',
+            'is_registered' => true,
+            'message' => 'Welcome back, ' . $user->name . '!',
+            'token' => $token,
+            'user' => $user->toApiArray(),
+        ]);
+    }
+
+    public function register(Request $request): JsonResponse
+    {
+        $rawPhone = trim((string) ($request->input('phone') ?? ''));
+        $inputName = trim((string) ($request->input('name') ?? ''));
+        $bloodGroup = trim((string) ($request->input('blood_group') ?? 'O+'));
+        $notes = trim((string) ($request->input('emergency_notes') ?? ''));
+
+        $digits = preg_replace('/\D/', '', $rawPhone);
+        if (strlen($digits) > 10) {
+            $digits = substr($digits, -10);
+        }
+
+        if (strlen($digits) !== 10 || !preg_match('/^[6-9]\d{9}$/', $digits)) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Invalid mobile number. Must be a valid 10-digit Indian SIM number starting with 6, 7, 8, or 9.',
+            ], 400);
+        }
+
+        if ($inputName === '') {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Full Name is required for user registration.',
+            ], 400);
+        }
+
+        $user = User::findByPhone($digits);
+        $cleanPhone = '+91 ' . $digits;
+
+        if ($user) {
+            $user->update([
+                'name' => $inputName,
+                'phone' => $cleanPhone,
+                'blood_group' => $bloodGroup ?: 'O+',
+                'emergency_notes' => $notes,
+            ]);
+        } else {
+            $user = User::create([
+                'public_id' => 'usr-' . ((int) (microtime(true) * 1000)),
+                'name' => $inputName,
+                'phone' => $cleanPhone,
+                'blood_group' => $bloodGroup ?: 'O+',
+                'emergency_notes' => $notes,
+            ]);
+        }
+
+        $token = 'sanctum_token_'.base64_encode($digits.':'.((int) (microtime(true) * 1000)));
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'User profile registered successfully! You can now log in with your mobile number.',
+            'token' => $token,
+            'user' => $user->toApiArray(),
+        ]);
+    }
 }

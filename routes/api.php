@@ -28,6 +28,10 @@ foreach (['/api', '/api/v1', ''] as $prefix) {
     Route::prefix($prefix)->group(function () {
         Route::post('/auth/otp/send', [UserAuthController::class, 'sendOtp']);
         Route::post('/auth/otp/verify', [UserAuthController::class, 'verifyOtp']);
+        Route::post('/user/auth/login', [UserAuthController::class, 'login']);
+        Route::post('/user/auth/register', [UserAuthController::class, 'register']);
+        Route::post('/auth/user-login', [UserAuthController::class, 'login']);
+        Route::post('/auth/user-register', [UserAuthController::class, 'register']);
         Route::match(['GET', 'POST'], '/auth/lookup-user', [UserAuthController::class, 'lookupUser']);
         Route::match(['GET', 'POST'], '/user/verify-sim', [UserAuthController::class, 'verifySimCarrier']);
         Route::get('/user/profile', [UserAuthController::class, 'getProfile']);
