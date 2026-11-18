@@ -94,14 +94,43 @@ class DriverOperationsController extends Controller
         if (!$driver) {
             return response()->json(['status' => 'error', 'message' => 'Unauthenticated driver session.'], 401);
         }
+
+        // 1. Offline drivers should not receive pending booking requests
+        if (!$driver->is_online) {
+            return response()->json([
+                'status' => 'success',
+                'requests' => [],
+            ]);
+        }
+
+        // 2. Strict exclusivity: Drivers currently on an active trip must NEVER receive new booking requests!
+        $hasActiveTrip = Booking::where('driver_id', $driver->id)
+            ->whereNotIn('status', ['trip_completed', 'completed', 'cancelled'])
+            ->exists();
+        if ($hasActiveTrip) {
+            return response()->json([
+                'status' => 'success',
+                'requests' => [],
+            ]);
+        }
+
         $declinedBookingIds = BookingDecline::where('driver_id', $driver->id)
             ->pluck('booking_id')
             ->all();
 
         $pending = Booking::where('status', 'finding_ambulance')
+            ->whereNull('driver_id')
             ->when(!empty($declinedBookingIds), static fn ($q) => $q->whereNotIn('id', $declinedBookingIds))
             ->orderByDesc('created_at')
             ->get()
+            ->filter(static function (Booking $b) use ($driver): bool {
+                // Only return bookings within driver's surrounding radius (<= 35 km)
+                if ((float) $driver->lat !== 0.0 && (float) $driver->lng !== 0.0 && (float) $b->pickup_lat !== 0.0 && (float) $b->pickup_lng !== 0.0) {
+                    $distKm = PhoneHelper::calculateDrivingDistanceKm((float) $driver->lat, (float) $driver->lng, (float) $b->pickup_lat, (float) $b->pickup_lng);
+                    return $distKm <= 35.0;
+                }
+                return true;
+            })
             ->map(static function (Booking $b) use ($driver): array {
                 $payload = $b->toBookingRequestJson();
                 if ((float) $driver->lat !== 0.0 && (float) $driver->lng !== 0.0 && (float) $b->pickup_lat !== 0.0 && (float) $b->pickup_lng !== 0.0) {
@@ -127,6 +156,17 @@ class DriverOperationsController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Unauthenticated driver session.'], 401);
         }
 
+        // Strict dispatch rule: Driver can only accept if they do NOT have an active ongoing trip
+        $alreadyOnTrip = Booking::where('driver_id', $driver->id)
+            ->whereNotIn('status', ['trip_completed', 'completed', 'cancelled'])
+            ->exists();
+        if ($alreadyOnTrip) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'You already have an active emergency trip in progress. Complete your ongoing trip before accepting another.',
+            ], 400);
+        }
+
         return DB::transaction(function () use ($request, $id, $driver) {
             $booking = Booking::where(function ($q) use ($id) {
                 $q->where('id', $id)->orWhere('booking_reference', $id);
@@ -142,7 +182,7 @@ class DriverOperationsController extends Controller
             if ($booking->driver_id !== null || !in_array($booking->status, ['finding_ambulance', 'pending', 'searching'])) {
                 return response()->json([
                     'status' => 'error',
-                    'message' => 'This emergency booking was already accepted by another ambulance or claimed by dispatch.',
+                    'message' => 'This emergency booking was already accepted by another ambulance unit.',
                 ], 409);
             }
 
@@ -177,16 +217,24 @@ class DriverOperationsController extends Controller
             WebSocketBroadcaster::broadcast($userChannels, 'DriverAssigned', $userPayload);
             WebSocketBroadcaster::broadcast($userChannels, 'BookingAccepted', $userPayload);
 
+            // Crucial: Instantly notify ALL other drivers to dismiss this request from their screens
             $claimedPayload = [
                 'booking_id' => $booking->id,
+                'id' => $booking->id,
                 'booking_reference' => $booking->booking_reference,
                 'driver_id' => $driver->id,
                 'driver_name' => $driver->name,
                 'status' => 'driver_assigned',
+                'message' => 'This emergency booking was accepted by another ambulance unit (' . $driver->name . ').',
             ];
-            WebSocketBroadcaster::broadcast('emergency-broadcasts', 'BookingAcceptedByOther', $claimedPayload);
-            WebSocketBroadcaster::broadcast('emergency-broadcasts', 'BookingClaimedByOther', $claimedPayload);
-            WebSocketBroadcaster::broadcast('emergency-broadcasts', 'booking-claimed', $claimedPayload);
+
+            $allDriverChannels = Driver::pluck('id')->map(static fn($did) => 'private-driver.'.$did)->all();
+            $dismissChannels = array_values(array_unique(array_merge(['emergency-broadcasts'], $allDriverChannels)));
+
+            WebSocketBroadcaster::broadcast($dismissChannels, 'BookingAcceptedByOther', $claimedPayload);
+            WebSocketBroadcaster::broadcast($dismissChannels, 'BookingClaimedByOther', $claimedPayload);
+            WebSocketBroadcaster::broadcast($dismissChannels, 'booking-claimed', $claimedPayload);
+            WebSocketBroadcaster::broadcast($dismissChannels, 'BookingCancelled', $claimedPayload);
 
             return response()->json([
                 'status' => 'success',
@@ -408,7 +456,23 @@ class DriverOperationsController extends Controller
                 ->first();
         }
 
-        $metrics = null;
+        $locationPayload = [
+            'event' => 'DriverLocationUpdated',
+            'driver_id' => (int) $driver->id,
+            'driverId' => (int) $driver->id,
+            'driver_name' => $driver->name,
+            'latitude' => (float) $driver->lat,
+            'longitude' => (float) $driver->lng,
+            'current_lat' => (float) $driver->lat,
+            'current_lng' => (float) $driver->lng,
+            'heading' => (float) $driver->heading,
+            'speed' => (float) $driver->speed,
+            'timestamp' => now()->toIso8601String(),
+            'driver' => $driver->toAssignedDriverPayload(),
+        ];
+
+        $targetChannels = ['emergency-broadcasts'];
+
         if ($activeBooking && $activeBooking->driver_id !== null) {
             $activeBooking->setRelation('driver', $driver);
             $metrics = $activeBooking->computePhaseMetrics();
@@ -418,31 +482,22 @@ class DriverOperationsController extends Controller
                 'eta_minutes' => $metrics['eta_minutes'],
             ]);
 
-            $locationPayload = [
-                'event' => 'DriverLocationUpdated',
-                'booking_id' => $activeBooking->id,
-                'booking_reference' => $activeBooking->booking_reference,
-                'latitude' => (float) $driver->lat,
-                'longitude' => (float) $driver->lng,
-                'current_lat' => (float) $driver->lat,
-                'current_lng' => (float) $driver->lng,
-                'heading' => (float) $driver->heading,
-                'speed' => (float) $driver->speed,
-                'status' => $activeBooking->status,
-                'distance_km' => $metrics['distance_km'],
-                'distance_meters' => $metrics['distance_meters'],
-                'eta_minutes' => $metrics['eta_minutes'],
-                'timestamp' => now()->toIso8601String(),
-                'driver' => $driver->toAssignedDriverPayload(),
-            ];
+            $locationPayload['booking_id'] = $activeBooking->id;
+            $locationPayload['booking_reference'] = $activeBooking->booking_reference;
+            $locationPayload['status'] = $activeBooking->status;
+            $locationPayload['distance_km'] = $metrics['distance_km'];
+            $locationPayload['distance_meters'] = $metrics['distance_meters'];
+            $locationPayload['eta_minutes'] = $metrics['eta_minutes'];
 
-            WebSocketBroadcaster::broadcast([
+            $targetChannels = array_merge($targetChannels, [
                 'private-bookings.'.$activeBooking->id,
                 'private-bookings.'.$activeBooking->booking_reference,
                 'private-booking.'.$activeBooking->id,
                 'private-booking.'.$activeBooking->booking_reference,
-            ], 'DriverLocationUpdated', $locationPayload);
+            ]);
         }
+
+        WebSocketBroadcaster::broadcast(array_values(array_unique($targetChannels)), 'DriverLocationUpdated', $locationPayload);
 
         return response()->json([
             'status' => 'success',

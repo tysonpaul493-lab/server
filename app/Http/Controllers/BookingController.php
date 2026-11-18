@@ -70,9 +70,19 @@ class BookingController extends Controller
             'estimated_drive_time' => $hospitalEtaMin.' min',
         ];
 
+        // Critical dispatch rule: Exclude drivers who currently have an active emergency trip
+        $busyDriverIds = Booking::whereNotNull('driver_id')
+            ->whereNotIn('status', ['trip_completed', 'completed', 'cancelled'])
+            ->pluck('driver_id')
+            ->filter()
+            ->unique()
+            ->all();
+
+        // Only dispatch to drivers who are ONLINE, located, and completely FREE
         $onlineDrivers = Driver::where('is_online', true)
             ->where('lat', '!=', 0)
             ->where('lng', '!=', 0)
+            ->whereNotIn('id', $busyDriverIds)
             ->get();
         $nearbyChannels = [];
         $initialKm = $hospitalDistanceKm;
@@ -94,6 +104,7 @@ class BookingController extends Controller
                 (float) $nearest->lng
             );
 
+            // Filter available free drivers within surrounding radius (<= 30.0 km)
             $nearbyChannels = $sorted->filter(static fn (Driver $d) => PhoneHelper::calculateDrivingDistanceKm(
                 $pickupLat,
                 $pickupLng,
@@ -145,9 +156,15 @@ class BookingController extends Controller
             'is_read' => false,
         ]);
 
-        $broadcastChannels = array_values(array_unique(array_merge($nearbyChannels, ['emergency-broadcasts'])));
-        WebSocketBroadcaster::broadcast($broadcastChannels, 'BookingRequested', $requestPayload);
-        WebSocketBroadcaster::broadcast($broadcastChannels, 'new-booking-request', $requestPayload);
+        // Dispatch exclusively to surrounding free drivers on their private channels
+        if (!empty($nearbyChannels)) {
+            WebSocketBroadcaster::broadcast($nearbyChannels, 'BookingRequested', $requestPayload);
+            WebSocketBroadcaster::broadcast($nearbyChannels, 'new-booking-request', $requestPayload);
+        }
+
+        // Also broadcast to central command center for live telemetry and hospital dispatch log
+        WebSocketBroadcaster::broadcast('emergency-broadcasts', 'NewEmergencyIncident', $requestPayload);
+        WebSocketBroadcaster::broadcast('emergency-broadcasts', 'BookingRequested', $requestPayload);
 
         return response()->json([
             'status' => 'success',
