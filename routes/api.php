@@ -66,6 +66,8 @@ foreach (['/api', '/api/v1', ''] as $prefix) {
         Route::post('/bookings/{id}/cancel-admin', [AdminApiController::class, 'cancelBooking']);
         Route::get('/hospitals', [AdminApiController::class, 'hospitals']);
         Route::get('/users', [AdminApiController::class, 'users']);
+        Route::get('/alerts', [AdminApiController::class, 'alerts']);
+        Route::get('/audit-logs', [AdminApiController::class, 'auditLogs']);
     });
 }
 

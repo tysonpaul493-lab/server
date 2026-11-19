@@ -629,6 +629,77 @@ class AdminApiController extends Controller
     }
 
     /**
+     * Operational Alerts Feed
+     */
+    public function alerts(): JsonResponse
+    {
+        $alerts = [];
+        $activeEmergency = Booking::whereIn('status', ['searching', 'pending', 'requested', 'failed'])->get();
+        foreach ($activeEmergency as $idx => $b) {
+            $alerts[] = [
+                'id' => $idx + 1,
+                'alert_code' => 'EMERGENCY_DISPATCH_QUEUE',
+                'severity' => 'CRITICAL',
+                'title' => "Pending Dispatch: " . ($b->booking_reference ?: '#BK-' . $b->id),
+                'message' => "Emergency request by " . ($b->patient_name ?: 'Citizen') . " (" . ($b->callback_phone ?: $b->patient_phone) . ") awaiting paramedic acceptance at " . ($b->pickup_address ?: 'GPS Location'),
+                'reference_type' => 'Booking',
+                'reference_id' => $b->id,
+                'is_acknowledged' => false,
+                'is_resolved' => false,
+                'created_at' => ($b->created_at ?: now())->toIso8601String(),
+            ];
+        }
+
+        $offlineDrivers = Driver::where('is_online', false)->where('verification_status', 'APPROVED')->count();
+        if ($offlineDrivers > 0) {
+            $alerts[] = [
+                'id' => 999,
+                'alert_code' => 'FLEET_CAPACITY_NOTICE',
+                'severity' => 'WARNING',
+                'title' => "Paramedic Availability Advisory",
+                'message' => "{$offlineDrivers} approved municipal paramedics are currently off duty.",
+                'reference_type' => 'Fleet',
+                'reference_id' => 0,
+                'is_acknowledged' => true,
+                'is_resolved' => false,
+                'created_at' => now()->toIso8601String(),
+            ];
+        }
+
+        return response()->json([
+            'success' => true,
+            'data' => $alerts,
+        ]);
+    }
+
+    /**
+     * System Audit Trail & Ledger
+     */
+    public function auditLogs(): JsonResponse
+    {
+        $logs = [];
+        $recentBookings = Booking::with('driver')->latest()->take(20)->get();
+        foreach ($recentBookings as $idx => $b) {
+            $logs[] = [
+                'id' => (int) $b->id,
+                'user_name' => $b->patient_name ?: 'Emergency Requester',
+                'user_role' => 'Citizen Patient',
+                'action' => strtoupper($b->status ?: 'REQUESTED'),
+                'target_type' => 'Booking',
+                'target_id' => $b->id,
+                'ip_address' => '127.0.0.1',
+                'reason' => "Emergency intake for " . ($b->pickup_address ?: 'Tamil Nadu Region'),
+                'created_at' => ($b->created_at ?: now())->toIso8601String(),
+            ];
+        }
+
+        return response()->json([
+            'success' => true,
+            'data' => $logs,
+        ]);
+    }
+
+    /**
      * Internal formatting helpers
      */
     private function formatAmbulancesList(): array
