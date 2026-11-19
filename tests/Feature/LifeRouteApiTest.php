@@ -142,6 +142,12 @@ class LifeRouteApiTest extends TestCase
         $this->assertGreaterThan(0, (float) $created->json('booking.distance_km'));
 
         $this->withToken($driverToken)
+            ->postJson('/api/v1/driver/location/telemetry', [
+                'latitude' => 12.9784,
+                'longitude' => 77.6408,
+            ])->assertOk();
+
+        $this->withToken($driverToken)
             ->getJson('/api/v1/driver/requests/pending')
             ->assertOk()
             ->assertJsonCount(1, 'requests');

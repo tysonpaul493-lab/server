@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Booking;
 use App\Models\BookingDecline;
+use App\Models\Driver;
 use App\Models\DriverNotification;
 use App\Services\DriverAuthResolver;
 use App\Services\PhoneHelper;
@@ -156,17 +157,6 @@ class DriverOperationsController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Unauthenticated driver session.'], 401);
         }
 
-        // Strict dispatch rule: Driver can only accept if they do NOT have an active ongoing trip
-        $alreadyOnTrip = Booking::where('driver_id', $driver->id)
-            ->whereNotIn('status', ['trip_completed', 'completed', 'cancelled'])
-            ->exists();
-        if ($alreadyOnTrip) {
-            return response()->json([
-                'status' => 'error',
-                'message' => 'You already have an active emergency trip in progress. Complete your ongoing trip before accepting another.',
-            ], 400);
-        }
-
         return DB::transaction(function () use ($request, $id, $driver) {
             $booking = Booking::where(function ($q) use ($id) {
                 $q->where('id', $id)->orWhere('booking_reference', $id);
@@ -184,6 +174,18 @@ class DriverOperationsController extends Controller
                     'status' => 'error',
                     'message' => 'This emergency booking was already accepted by another ambulance unit.',
                 ], 409);
+            }
+
+            // Strict dispatch rule: Driver can only accept if they do NOT have an active ongoing trip
+            $alreadyOnTrip = Booking::where('driver_id', $driver->id)
+                ->where('id', '!=', $booking->id)
+                ->whereNotIn('status', ['trip_completed', 'completed', 'cancelled'])
+                ->exists();
+            if ($alreadyOnTrip) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'You already have an active emergency trip in progress. Complete your ongoing trip before accepting another.',
+                ], 400);
             }
 
             $hasDriverCoords = (float) $driver->lat !== 0.0 && (float) $driver->lng !== 0.0;
