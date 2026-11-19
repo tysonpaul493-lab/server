@@ -278,6 +278,82 @@ class AdminApiController extends Controller
         ]);
     }
 
+    public function updateAmbulanceStatus(Request $request, string $id): JsonResponse
+    {
+        $driver = Driver::find((int) $id);
+        if (!$driver) {
+            return response()->json(['success' => false, 'message' => 'Ambulance unit not found.'], 404);
+        }
+
+        $status = strtoupper((string) $request->input('status', 'AVAILABLE'));
+        if ($status === 'MAINTENANCE') {
+            $driver->update(['is_online' => false]);
+        } elseif ($status === 'AVAILABLE') {
+            $driver->update(['is_online' => true]);
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Ambulance operational status updated successfully.',
+            'status' => $status,
+        ]);
+    }
+
+    public function addAmbulance(Request $request): JsonResponse
+    {
+        $regNumber = strtoupper(trim((string) $request->input('registration_number', 'TN 38 EMG 1081')));
+        $vehicleType = strtoupper(trim((string) $request->input('vehicle_type', 'ALS')));
+        $operator = (string) $request->input('operator_name', 'State Emergency Medical Services');
+
+        $existing = Driver::where('vehicle_plate', $regNumber)->orWhere('vehicle_number', $regNumber)->first();
+        if ($existing) {
+            return response()->json(['success' => false, 'message' => 'Vehicle with plate number already registered.'], 422);
+        }
+
+        $driver = Driver::create([
+            'name' => 'Paramedic Crew (' . $regNumber . ')',
+            'phone' => '+91 ' . rand(7000000000, 9999999999),
+            'email' => 'crew_' . strtolower(preg_replace('/[^a-zA-Z0-9]/', '', $regNumber)) . '@paramedic.org',
+            'vehicle_plate' => $regNumber,
+            'vehicle_number' => $regNumber,
+            'vehicle_type' => $vehicleType,
+            'operator_affiliation' => $operator,
+            'verification_status' => 'APPROVED',
+            'is_online' => true,
+            'lat' => (float) $request->input('latitude', 11.0168),
+            'lng' => (float) $request->input('longitude', 76.9558),
+            'speed' => 0.0,
+            'heading' => 0.0,
+            'total_trips' => 0,
+            'rating' => 5.0,
+        ]);
+
+        $amb = [
+            'id' => (int) $driver->id,
+            'registration_number' => $regNumber,
+            'vehicle_type' => $vehicleType,
+            'operator_name' => $operator,
+            'primary_driver_id' => (int) $driver->id,
+            'equipment_capabilities' => (array) $request->input('equipment_capabilities', ['Oxygen', 'Defibrillator', 'Ventilator']),
+            'verification_status' => 'APPROVED',
+            'fitness_expiry' => (string) $request->input('fitness_expiry', '2027-12-31'),
+            'insurance_expiry' => (string) $request->input('insurance_expiry', '2027-12-31'),
+            'permit_expiry' => (string) $request->input('permit_expiry', '2027-12-31'),
+            'operational_status' => 'AVAILABLE',
+            'latitude' => (float) $request->input('latitude', 11.0168),
+            'longitude' => (float) $request->input('longitude', 76.9558),
+            'speed_kmh' => 0,
+            'heading' => 0,
+            'battery_fuel_percentage' => 100,
+            'service_zone' => (string) $request->input('service_zone', 'Central'),
+        ];
+
+        return response()->json([
+            'success' => true,
+            'ambulance' => $amb,
+        ]);
+    }
+
     /**
      * All registered Drivers
      */
@@ -312,6 +388,7 @@ class AdminApiController extends Controller
                 'verification_status' => $status,
                 'online_status' => $d->is_online ? 'ONLINE' : 'OFFLINE',
                 'operational_status' => $hasActiveTrip ? 'ON_TRIP' : ($d->is_online ? 'AVAILABLE' : 'OFFLINE'),
+                'has_active_trip' => $hasActiveTrip,
                 'assigned_ambulance_id' => (int) $d->id,
                 'assigned_ambulance' => [
                     'id' => (int) $d->id,
@@ -594,6 +671,29 @@ class AdminApiController extends Controller
         ]);
     }
 
+    public function addBookingNote(Request $request, string $id): JsonResponse
+    {
+        $booking = BookingController::findBookingByKey($id);
+        if (!$booking) {
+            return response()->json(['success' => false, 'message' => 'Booking not found.'], 404);
+        }
+
+        $note = (string) $request->input('note', '');
+        $author = (string) $request->input('author', 'Dispatcher');
+        $timestamp = now()->toDateTimeString();
+
+        $entry = "[{$timestamp} | {$author}]: {$note}\n";
+        $existing = (string) ($booking->handover_notes ?: '');
+        $updated = $existing ? ($existing . "\n" . $entry) : $entry;
+
+        $booking->update(['handover_notes' => $updated]);
+
+        return response()->json([
+            'success' => true,
+            'operational_notes' => $updated,
+        ]);
+    }
+
     /**
      * Verified Hospital Network
      */
@@ -627,12 +727,62 @@ class AdminApiController extends Controller
         ]);
     }
 
+    public function addHospital(Request $request): JsonResponse
+    {
+        $h = [
+            'id' => rand(100, 999),
+            'name' => (string) $request->input('name', 'Hospital Center'),
+            'category' => (string) $request->input('category', 'Apex Level 1 Trauma Center'),
+            'address' => (string) $request->input('address', 'Coimbatore'),
+            'latitude' => (float) $request->input('latitude', 11.0168),
+            'longitude' => (float) $request->input('longitude', 76.9558),
+            'phone' => (string) $request->input('phone', '0422-2485000'),
+            'emergency_contact' => (string) $request->input('emergency_contact', '108'),
+            'verified_services' => (array) $request->input('verified_services', ['24x7 Casualty', 'Trauma Unit']),
+            'specialties' => (array) $request->input('specialties', ['Emergency Trauma Surgery']),
+            'verification_status' => 'VERIFIED',
+            'service_zone' => (string) $request->input('service_zone', 'Central'),
+            'has_live_integration' => true,
+        ];
+
+        return response()->json([
+            'success' => true,
+            'hospital' => $h,
+        ]);
+    }
+
     /**
      * Registered App Users
      */
     public function users(): JsonResponse
     {
-        $users = User::all()->map(function (User $u) {
+        $allBookings = Booking::select('callback_phone', 'status')->get();
+
+        $activePhoneMap = [];
+        $phoneCountMap = [];
+
+        $activeStatuses = [
+            'requested', 'searching', 'assigned', 'accepted',
+            'en_route_to_pickup', 'arrived_at_pickup', 'patient_on_board',
+            'en_route_to_hospital', 'arrived_at_hospital', 'finding_ambulance'
+        ];
+
+        foreach ($allBookings as $b) {
+            $rawPhone = preg_replace('/[^0-9]/', '', (string) $b->callback_phone);
+            $key = strlen($rawPhone) >= 10 ? substr($rawPhone, -10) : $rawPhone;
+            if ($key === '') continue;
+
+            $phoneCountMap[$key] = ($phoneCountMap[$key] ?? 0) + 1;
+
+            if (in_array(strtolower((string) $b->status), $activeStatuses, true)) {
+                $activePhoneMap[$key] = true;
+            }
+        }
+
+        $users = User::all()->map(function (User $u) use ($activePhoneMap, $phoneCountMap) {
+            $rawPhone = preg_replace('/[^0-9]/', '', (string) $u->phone);
+            $key = strlen($rawPhone) >= 10 ? substr($rawPhone, -10) : $rawPhone;
+
             return [
                 'id' => (int) $u->id,
                 'name' => $u->name ?: 'Emergency Caller',
@@ -640,6 +790,8 @@ class AdminApiController extends Controller
                 'phone' => $u->phone,
                 'blood_group' => $u->blood_group ?: 'O+',
                 'status' => 'ACTIVE',
+                'bookings_count' => (int) ($phoneCountMap[$key] ?? 0),
+                'has_active_emergency' => !empty($activePhoneMap[$key]),
                 'created_at' => ($u->created_at ?: now())->toIso8601String(),
             ];
         });
@@ -691,6 +843,31 @@ class AdminApiController extends Controller
         return response()->json([
             'success' => true,
             'data' => $alerts,
+        ]);
+    }
+
+    public function broadcastAlert(Request $request): JsonResponse
+    {
+        $title = (string) $request->input('title', 'Central Broadcast');
+        $message = (string) $request->input('message', '');
+        $severity = strtoupper((string) $request->input('severity', 'CRITICAL'));
+
+        $alert = [
+            'id' => (int) round(microtime(true) * 1000),
+            'alert_code' => 'BROADCAST_ANNOUNCEMENT',
+            'severity' => $severity,
+            'title' => '[Announcement] ' . $title,
+            'message' => $message,
+            'is_acknowledged' => false,
+            'is_resolved' => false,
+            'created_at' => now()->toIso8601String(),
+        ];
+
+        WebSocketBroadcaster::broadcast(['emergency-broadcasts'], 'BroadcastAnnouncement', $alert);
+
+        return response()->json([
+            'success' => true,
+            'alert' => $alert,
         ]);
     }
 
@@ -809,10 +986,23 @@ class AdminApiController extends Controller
 
         $driver = $b->relationLoaded('driver') ? $b->driver : ($b->driver_id ? Driver::find($b->driver_id) : null);
 
+        static $userPhoneMap = null;
+        if ($userPhoneMap === null) {
+            $userPhoneMap = [];
+            foreach (User::select('id', 'phone')->get() as $u) {
+                $p = preg_replace('/[^0-9]/', '', (string) $u->phone);
+                $k = strlen($p) >= 10 ? substr($p, -10) : $p;
+                if ($k !== '') $userPhoneMap[$k] = (int) $u->id;
+            }
+        }
+        $rawPhone = preg_replace('/[^0-9]/', '', (string) $b->callback_phone);
+        $phone10 = strlen($rawPhone) >= 10 ? substr($rawPhone, -10) : $rawPhone;
+        $matchedUserId = $userPhoneMap[$phone10] ?? 1;
+
         return [
             'id' => (int) $b->id,
             'booking_reference' => $b->booking_reference ?: '#BK-' . $b->id,
-            'user_id' => 1,
+            'user_id' => $matchedUserId,
             'requester_name' => $b->patient_name ?: 'Emergency Caller (SIM Verified)',
             'requester_phone' => $b->callback_phone ?: '+91 8428304510',
             'patient_name' => $b->patient_name ?: 'Emergency Patient',

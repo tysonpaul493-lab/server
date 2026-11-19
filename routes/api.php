@@ -58,15 +58,20 @@ foreach (['/api', '/api/v1', ''] as $prefix) {
         Route::get('/dashboard/stats', [AdminApiController::class, 'dashboardStats']);
         Route::get('/tracking/live', [AdminApiController::class, 'liveTracking']);
         Route::get('/ambulances', [AdminApiController::class, 'ambulances']);
+        Route::post('/ambulances', [AdminApiController::class, 'addAmbulance']);
+        Route::post('/ambulances/{id}/status', [AdminApiController::class, 'updateAmbulanceStatus']);
         Route::get('/drivers', [AdminApiController::class, 'drivers']);
         Route::post('/drivers/{id}/verify', [AdminApiController::class, 'verifyDriver']);
         Route::post('/drivers/{id}/toggle-suspension', [AdminApiController::class, 'toggleSuspension']);
         Route::get('/bookings', [AdminApiController::class, 'bookings']);
         Route::post('/bookings/{id}/assign-driver', [AdminApiController::class, 'assignDriver']);
         Route::post('/bookings/{id}/cancel-admin', [AdminApiController::class, 'cancelBooking']);
+        Route::post('/bookings/{id}/notes', [AdminApiController::class, 'addBookingNote']);
         Route::get('/hospitals', [AdminApiController::class, 'hospitals']);
+        Route::post('/hospitals', [AdminApiController::class, 'addHospital']);
         Route::get('/users', [AdminApiController::class, 'users']);
         Route::get('/alerts', [AdminApiController::class, 'alerts']);
+        Route::post('/alerts/broadcast', [AdminApiController::class, 'broadcastAlert']);
         Route::get('/audit-logs', [AdminApiController::class, 'auditLogs']);
     });
 }
