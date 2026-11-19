@@ -228,6 +228,10 @@ class Booking extends Model
         $destLng = (float) ($destObj['lng'] ?? $destObj['longitude'] ?? $this->destination_longitude ?: $pickupLng);
         $metrics = $this->computePhaseMetrics();
 
+        $createdAt = $this->created_at ? \Carbon\Carbon::parse($this->created_at) : now();
+        $elapsed = (int) now()->diffInSeconds($createdAt, true);
+        $countdown = max(15, 120 - $elapsed);
+
         return [
             'id' => (int) $this->id,
             'booking_reference' => $this->booking_reference ?: '#LR-'.$this->id,
@@ -245,7 +249,7 @@ class Booking extends Model
             'essential_instructions' => $this->notes ?: ($this->essential_instructions ?: 'Urgent medical assistance requested.'),
             'distance_meters' => $metrics['distance_meters'],
             'estimated_eta_minutes' => $metrics['eta_minutes'],
-            'countdown_seconds' => 120,
+            'countdown_seconds' => $countdown,
             'created_at' => ($this->created_at ?? now())->toIso8601String(),
         ];
     }

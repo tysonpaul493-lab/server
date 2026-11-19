@@ -104,7 +104,13 @@ class DriverOperationsController extends Controller
             ]);
         }
 
-        // 2. Strict exclusivity: Drivers currently on an active trip must NEVER receive new booking requests!
+        // 2. Strict exclusivity: Drivers currently on a FRESH active trip (< 12 hours) must not receive new requests
+        $staleThreshold = now()->subHours(12);
+        Booking::where('driver_id', $driver->id)
+            ->whereNotIn('status', ['trip_completed', 'completed', 'cancelled'])
+            ->where('created_at', '<', $staleThreshold)
+            ->update(['status' => 'trip_completed', 'completed_at' => now()]);
+
         $hasActiveTrip = Booking::where('driver_id', $driver->id)
             ->whereNotIn('status', ['trip_completed', 'completed', 'cancelled'])
             ->exists();
@@ -119,22 +125,26 @@ class DriverOperationsController extends Controller
             ->pluck('booking_id')
             ->all();
 
-        $pending = Booking::where('status', 'finding_ambulance')
+        $allPending = Booking::whereIn('status', ['finding_ambulance', 'pending', 'searching'])
             ->whereNull('driver_id')
             ->when(!empty($declinedBookingIds), static fn ($q) => $q->whereNotIn('id', $declinedBookingIds))
             ->orderByDesc('created_at')
-            ->get()
-            ->filter(static function (Booking $b) use ($driver): bool {
-                // Only return bookings within driver's surrounding radius (<= 35 km)
-                if ((float) $driver->lat !== 0.0 && (float) $driver->lng !== 0.0 && (float) $b->pickup_lat !== 0.0 && (float) $b->pickup_lng !== 0.0) {
+            ->get();
+
+        $hasDriverCoords = (float) $driver->lat !== 0.0 && (float) $driver->lng !== 0.0;
+
+        $pending = $allPending
+            ->filter(static function (Booking $b) use ($driver, $hasDriverCoords): bool {
+                // If driver and pickup both have coordinates, allow up to 100 km dispatch radius
+                if ($hasDriverCoords && (float) $b->pickup_lat !== 0.0 && (float) $b->pickup_lng !== 0.0) {
                     $distKm = PhoneHelper::calculateDrivingDistanceKm((float) $driver->lat, (float) $driver->lng, (float) $b->pickup_lat, (float) $b->pickup_lng);
-                    return $distKm <= 35.0;
+                    return $distKm <= 100.0;
                 }
                 return true;
             })
-            ->map(static function (Booking $b) use ($driver): array {
+            ->map(static function (Booking $b) use ($driver, $hasDriverCoords): array {
                 $payload = $b->toBookingRequestJson();
-                if ((float) $driver->lat !== 0.0 && (float) $driver->lng !== 0.0 && (float) $b->pickup_lat !== 0.0 && (float) $b->pickup_lng !== 0.0) {
+                if ($hasDriverCoords && (float) $b->pickup_lat !== 0.0 && (float) $b->pickup_lng !== 0.0) {
                     $distKm = PhoneHelper::calculateDrivingDistanceKm((float) $driver->lat, (float) $driver->lng, (float) $b->pickup_lat, (float) $b->pickup_lng);
                     $payload['distance_meters'] = round($distKm * 1000.0, 1);
                     $payload['estimated_eta_minutes'] = PhoneHelper::estimateEtaMinutes($distKm);

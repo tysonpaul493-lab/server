@@ -165,6 +165,7 @@ class BookingController extends Controller
         // Also broadcast to central command center for live telemetry and hospital dispatch log
         WebSocketBroadcaster::broadcast('emergency-broadcasts', 'NewEmergencyIncident', $requestPayload);
         WebSocketBroadcaster::broadcast('emergency-broadcasts', 'BookingRequested', $requestPayload);
+        WebSocketBroadcaster::broadcast('emergency-broadcasts', 'new-booking-request', $requestPayload);
 
         return response()->json([
             'status' => 'success',
