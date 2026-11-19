@@ -169,15 +169,37 @@ class AdminApiController extends Controller
             ->take(8)
             ->get()
             ->map(function (Booking $b) {
+                $hospName = is_array($b->destination_hospital) ? ($b->destination_hospital['name'] ?? 'Nearest Trauma Center') : ($b->destination_address ?: 'Emergency Hospital');
+                $driverName = $b->driver ? $b->driver->name : 'Unassigned';
+                $vehiclePlate = $b->driver ? ($b->driver->vehicle_plate ?: ($b->driver->vehicle_number ?: 'TN-38-EMG')) : 'N/A';
+
                 return [
                     'id' => (string) $b->id,
                     'reference' => $b->booking_reference ?: '#BK-' . $b->id,
+                    'booking_reference' => $b->booking_reference ?: '#BK-' . $b->id,
                     'patient_name' => $b->patient_name ?: 'Emergency Patient',
+                    'requester_name' => $b->patient_name ?: 'Emergency Patient',
                     'patient_phone' => $b->callback_phone ?: 'SIM Verified',
+                    'requester_phone' => $b->callback_phone ?: 'SIM Verified',
                     'pickup_address' => $b->pickup_address,
-                    'destination' => is_array($b->destination_hospital) ? ($b->destination_hospital['name'] ?? 'Nearest Trauma Center') : 'Emergency Hospital',
-                    'driver_name' => $b->driver ? $b->driver->name : 'Unassigned',
-                    'vehicle_plate' => $b->driver ? ($b->driver->vehicle_plate ?: 'TN-38-EMG') : 'N/A',
+                    'destination' => $hospName,
+                    'hospital_name' => $hospName,
+                    'hospital' => [
+                        'name' => $hospName,
+                        'address' => $b->destination_address ?: 'Coimbatore Region',
+                    ],
+                    'driver_name' => $driverName,
+                    'vehicle_plate' => $vehiclePlate,
+                    'driver' => $b->driver ? [
+                        'id' => (int) $b->driver->id,
+                        'name' => $b->driver->name,
+                        'full_name' => $b->driver->name,
+                        'phone' => $b->driver->phone,
+                    ] : null,
+                    'ambulance' => $b->driver ? [
+                        'registration_number' => $vehiclePlate,
+                        'vehicle_type' => strtoupper((string) ($b->driver->vehicle_type ?: 'ALS')),
+                    ] : null,
                     'status' => $this->normalizeBookingStatusForAdmin($b->status),
                     'severity' => strtoupper((string) ($b->emergency_category ?: 'CRITICAL')),
                     'distance_km' => (float) ($b->distance_km ?: 0.0),
