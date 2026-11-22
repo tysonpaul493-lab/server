@@ -57,16 +57,19 @@ class DriverAuthResolver
                 }
             }
 
-            $parts = explode('|', $token, 2);
-            if (isset($parts[0]) && ctype_digit($parts[0])) {
-                $driver = Driver::find((int) $parts[0]);
-                if ($driver) {
-                    return $driver;
+            // In local/testing mode, allow structured tokens or demo tokens for development tests
+            if (config('app.debug') || app()->environment('local', 'testing')) {
+                $parts = explode('|', $token, 2);
+                if (isset($parts[0]) && ctype_digit($parts[0])) {
+                    $driver = Driver::find((int) $parts[0]);
+                    if ($driver) {
+                        return $driver;
+                    }
                 }
-            }
 
-            if ($token === 'demo_token' || $token === 'demo_driver_token') {
-                return Driver::where('verification_status', 'approved')->first();
+                if ($token === 'demo_token' || $token === 'demo_driver_token') {
+                    return Driver::where('verification_status', 'approved')->first() ?? Driver::first();
+                }
             }
         }
 

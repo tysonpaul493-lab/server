@@ -89,8 +89,9 @@ class UserAuthController extends Controller
             })
             ->first();
 
+        $isDevOrTest = config('app.debug') || app()->environment('local', 'testing');
         $isValid = ($record && $record->otp_code === $otp && now()->lte($record->expires_at))
-            || $otp === '123456';
+            || ($isDevOrTest && $otp === '123456');
 
         if (!$isValid) {
             RateLimiter::hit($throttleKey, 300);

@@ -2,9 +2,12 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\AuditLog;
 use App\Models\Booking;
 use App\Models\BookingDecline;
+use App\Models\BookingStatusLog;
 use App\Models\Driver;
+use App\Models\DriverLocationHistory;
 use App\Models\DriverNotification;
 use App\Services\DriverAuthResolver;
 use App\Services\PhoneHelper;
@@ -365,6 +368,23 @@ class DriverOperationsController extends Controller
         if (!empty($driverUpdates)) {
             $driver->update($driverUpdates);
             $driver->refresh();
+
+            // Record location telemetry breadcrumbs
+            try {
+                if (isset($driverUpdates['lat']) && isset($driverUpdates['lng'])) {
+                    DriverLocationHistory::create([
+                        'driver_id' => $driver->id,
+                        'booking_id' => $activeBooking?->id,
+                        'lat' => (float) $driverUpdates['lat'],
+                        'lng' => (float) $driverUpdates['lng'],
+                        'heading' => (float) ($driverUpdates['heading'] ?? $driver->heading ?? 0.0),
+                        'speed' => (float) ($driverUpdates['speed'] ?? $driver->speed ?? 0.0),
+                        'recorded_at' => now(),
+                    ]);
+                }
+            } catch (\Throwable $e) {
+                // Non-blocking telemetry history write
+            }
         }
 
         $status = (string) $request->input('status', '');
@@ -401,8 +421,42 @@ class DriverOperationsController extends Controller
             $driver->increment('total_trips');
         }
 
+        $oldStatus = $booking->status;
         if (!empty($bookingUpdates)) {
             $booking->update($bookingUpdates);
+            $booking->refresh();
+
+            // Log state transition into BookingStatusLog
+            try {
+                BookingStatusLog::create([
+                    'booking_id' => $booking->id,
+                    'booking_reference' => $booking->booking_reference,
+                    'from_status' => $oldStatus,
+                    'to_status' => $booking->status,
+                    'actor_type' => 'driver',
+                    'actor_id' => $driver->id,
+                    'notes' => $booking->handover_notes ?: "Status transition to {$booking->status}",
+                    'lat' => (float) $driver->lat,
+                    'lng' => (float) $driver->lng,
+                ]);
+
+                AuditLog::create([
+                    'admin_id' => null,
+                    'admin_name' => $driver->name,
+                    'action' => 'TRIP_STATUS_' . strtoupper($booking->status),
+                    'entity_type' => 'Booking',
+                    'entity_id' => (string) $booking->id,
+                    'details' => [
+                        'from_status' => $oldStatus,
+                        'to_status' => $booking->status,
+                        'driver_id' => $driver->id,
+                        'reference' => $booking->booking_reference,
+                    ],
+                    'ip_address' => $request->ip(),
+                ]);
+            } catch (\Throwable $e) {
+                // Silently tolerate if table schema is in migration
+            }
         }
         $booking->load('driver');
         if (!in_array($booking->status, ['trip_completed', 'completed'], true)) {
@@ -453,6 +507,23 @@ class DriverOperationsController extends Controller
         if (!empty($driverUpdates)) {
             $driver->update($driverUpdates);
             $driver->refresh();
+
+            // Record location telemetry breadcrumbs
+            try {
+                if (isset($driverUpdates['lat']) && isset($driverUpdates['lng'])) {
+                    DriverLocationHistory::create([
+                        'driver_id' => $driver->id,
+                        'booking_id' => $activeBooking?->id,
+                        'lat' => (float) $driverUpdates['lat'],
+                        'lng' => (float) $driverUpdates['lng'],
+                        'heading' => (float) ($driverUpdates['heading'] ?? $driver->heading ?? 0.0),
+                        'speed' => (float) ($driverUpdates['speed'] ?? $driver->speed ?? 0.0),
+                        'recorded_at' => now(),
+                    ]);
+                }
+            } catch (\Throwable $e) {
+                // Non-blocking telemetry history write
+            }
         }
 
         $bookingRef = $request->input('booking_reference');
