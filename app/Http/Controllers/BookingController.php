@@ -70,7 +70,14 @@ class BookingController extends Controller
             'estimated_drive_time' => $hospitalEtaMin.' min',
         ];
 
-        // Critical dispatch rule: Exclude drivers who currently have an active emergency trip
+        // Critical dispatch rule: Auto-complete stale trips older than 15 minutes
+        $staleThreshold = now()->subMinutes(15);
+        Booking::whereNotNull('driver_id')
+            ->whereNotIn('status', ['trip_completed', 'completed', 'cancelled'])
+            ->where('created_at', '<', $staleThreshold)
+            ->update(['status' => 'trip_completed', 'completed_at' => now()]);
+
+        // Exclude drivers who currently have a fresh active emergency trip
         $busyDriverIds = Booking::whereNotNull('driver_id')
             ->whereNotIn('status', ['trip_completed', 'completed', 'cancelled'])
             ->pluck('driver_id')
@@ -78,43 +85,43 @@ class BookingController extends Controller
             ->unique()
             ->all();
 
-        // Only dispatch to drivers who are ONLINE, located, and completely FREE
+        // Dispatch to drivers who are ONLINE and FREE
         $onlineDrivers = Driver::where('is_online', true)
-            ->where('lat', '!=', 0)
-            ->where('lng', '!=', 0)
             ->whereNotIn('id', $busyDriverIds)
             ->get();
+
+        if ($onlineDrivers->isEmpty()) {
+            // Fallback: If all online drivers were flagged busy, ensure online drivers still get alerted
+            $onlineDrivers = Driver::where('is_online', true)->get();
+        }
+
         $nearbyChannels = [];
         $initialKm = $hospitalDistanceKm;
 
         if ($onlineDrivers->isNotEmpty()) {
-            $sorted = $onlineDrivers->sortBy(static fn (Driver $d) => PhoneHelper::calculateDrivingDistanceKm(
-                $pickupLat,
-                $pickupLng,
-                (float) $d->lat,
-                (float) $d->lng
-            ))->values();
+            $sorted = $onlineDrivers->sortBy(static function (Driver $d) use ($pickupLat, $pickupLng) {
+                if ((float) $d->lat === 0.0 && (float) $d->lng === 0.0) {
+                    return 999.0;
+                }
+                return PhoneHelper::calculateDrivingDistanceKm(
+                    $pickupLat,
+                    $pickupLng,
+                    (float) $d->lat,
+                    (float) $d->lng
+                );
+            })->values();
 
             /** @var Driver $nearest */
             $nearest = $sorted->first();
             $initialKm = PhoneHelper::calculateDrivingDistanceKm(
                 $pickupLat,
                 $pickupLng,
-                (float) $nearest->lat,
-                (float) $nearest->lng
+                (float) ($nearest->lat != 0 ? $nearest->lat : $pickupLat),
+                (float) ($nearest->lng != 0 ? $nearest->lng : $pickupLng)
             );
 
-            // Filter available free drivers within surrounding radius (<= 30.0 km)
-            $nearbyChannels = $sorted->filter(static fn (Driver $d) => PhoneHelper::calculateDrivingDistanceKm(
-                $pickupLat,
-                $pickupLng,
-                (float) $d->lat,
-                (float) $d->lng
-            ) <= 30.0)->map(static fn (Driver $d) => 'private-driver.'.$d->id)->values()->all();
-
-            if (empty($nearbyChannels)) {
-                $nearbyChannels = ['private-driver.'.$nearest->id];
-            }
+            // Filter available drivers and dispatch to all online drivers
+            $nearbyChannels = $sorted->map(static fn (Driver $d) => 'private-driver.'.$d->id)->values()->all();
         }
 
         $initialMeters = round($initialKm * 1000.0, 1);

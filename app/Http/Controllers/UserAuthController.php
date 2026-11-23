@@ -262,26 +262,58 @@ class UserAuthController extends Controller
     public function login(Request $request): JsonResponse
     {
         $rawPhone = trim((string) ($request->input('phone') ?? ''));
+        $inputName = trim((string) ($request->input('name') ?? ''));
         $digits = preg_replace('/\D/', '', $rawPhone);
         if (strlen($digits) > 10) {
             $digits = substr($digits, -10);
         }
 
-        if (strlen($digits) !== 10) {
+        if (strlen($digits) !== 10 || !preg_match('/^[6-9]\d{9}$/', $digits)) {
             return response()->json([
                 'status' => 'error',
-                'message' => 'Please enter a valid 10-digit mobile number.',
+                'message' => 'Please enter a valid 10-digit Indian SIM mobile number starting with 6, 7, 8, or 9.',
             ], 400);
+        }
+
+        // Anti-fraud repeating/dummy check
+        $fakePatterns = ['9999999999', '8888888888', '7777777777', '6666666666', '1234567890', '9876543210', '0000000000', '9999910800'];
+        if (in_array($digits, $fakePatterns, true) || preg_match('/^(\d)\1{9}$/', $digits)) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Fraud Protection: Suspicious repeating or dummy number detected. Please use your genuine SIM mobile number.',
+            ], 400);
+        }
+
+        // SIM card mismatch protection: If device hardware SIM number is provided, verify match
+        $deviceSimNumber = trim((string) ($request->input('sim_number') ?? ''));
+        if ($deviceSimNumber !== '') {
+            $simDigits = preg_replace('/\D/', '', $deviceSimNumber);
+            if (strlen($simDigits) >= 10) {
+                $simLast10 = substr($simDigits, -10);
+                if ($simLast10 !== $digits) {
+                    return response()->json([
+                        'status' => 'error',
+                        'message' => "Security Alert: SIM card mismatch. The entered mobile number (+91 {$digits}) does not match the SIM card (+91 {$simLast10}) inserted in this mobile phone. You can only use the physical SIM active in this device.",
+                    ], 403);
+                }
+            }
         }
 
         $user = User::findByPhone($digits);
 
-        if (!$user || empty(trim($user->name))) {
-            return response()->json([
-                'status' => 'error',
-                'is_registered' => false,
-                'message' => 'Wrong mobile number: This number is not registered on this device or database. Please register first.',
-            ], 404);
+        if (!$user) {
+            $userName = $inputName !== '' ? $inputName : 'Emergency Caller';
+            $user = User::create([
+                'public_id' => 'usr-' . ((int) (microtime(true) * 1000)),
+                'name' => $userName,
+                'phone' => '+91 ' . $digits,
+                'blood_group' => 'O+',
+                'emergency_notes' => '',
+            ]);
+        } else {
+            if ($inputName !== '' && ($user->name === '' || $user->name === 'Emergency Caller' || $user->name !== $inputName)) {
+                $user->update(['name' => $inputName]);
+            }
         }
 
         $token = 'sanctum_token_'.base64_encode($digits.':'.((int) (microtime(true) * 1000)));
@@ -289,7 +321,7 @@ class UserAuthController extends Controller
         return response()->json([
             'status' => 'success',
             'is_registered' => true,
-            'message' => 'Welcome back, ' . $user->name . '!',
+            'message' => 'Welcome, ' . $user->name . '!',
             'token' => $token,
             'user' => $user->toApiArray(),
         ]);

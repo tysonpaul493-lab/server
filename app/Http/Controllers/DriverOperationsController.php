@@ -107,8 +107,8 @@ class DriverOperationsController extends Controller
             ]);
         }
 
-        // 2. Strict exclusivity: Drivers currently on a FRESH active trip (< 12 hours) must not receive new requests
-        $staleThreshold = now()->subHours(12);
+        // 2. Strict exclusivity: Drivers currently on a FRESH active trip (< 15 minutes) must not receive new requests
+        $staleThreshold = now()->subMinutes(15);
         Booking::where('driver_id', $driver->id)
             ->whereNotIn('status', ['trip_completed', 'completed', 'cancelled'])
             ->where('created_at', '<', $staleThreshold)
@@ -243,13 +243,12 @@ class DriverOperationsController extends Controller
                 'message' => 'This emergency booking was accepted by another ambulance unit (' . $driver->name . ').',
             ];
 
-            $allDriverChannels = Driver::pluck('id')->map(static fn($did) => 'private-driver.'.$did)->all();
-            $dismissChannels = array_values(array_unique(array_merge(['emergency-broadcasts'], $allDriverChannels)));
+            $otherDriverChannels = Driver::where('id', '!=', $driver->id)->pluck('id')->map(static fn($did) => 'private-driver.'.$did)->all();
+            $dismissChannels = array_values(array_unique(array_merge(['emergency-broadcasts'], $otherDriverChannels)));
 
             WebSocketBroadcaster::broadcast($dismissChannels, 'BookingAcceptedByOther', $claimedPayload);
             WebSocketBroadcaster::broadcast($dismissChannels, 'BookingClaimedByOther', $claimedPayload);
             WebSocketBroadcaster::broadcast($dismissChannels, 'booking-claimed', $claimedPayload);
-            WebSocketBroadcaster::broadcast($dismissChannels, 'BookingCancelled', $claimedPayload);
 
             return response()->json([
                 'status' => 'success',
@@ -496,6 +495,20 @@ class DriverOperationsController extends Controller
         if (!$driver) {
             return response()->json(['status' => 'error', 'message' => 'Unauthenticated driver session.'], 401);
         }
+
+        $bookingRef = $request->input('booking_reference');
+        $activeBooking = null;
+        if (is_string($bookingRef) && $bookingRef !== '') {
+            $activeBooking = BookingController::findBookingByKey($bookingRef);
+        }
+        if (!$activeBooking) {
+            $activeBooking = Booking::with('driver')
+                ->where('driver_id', $driver->id)
+                ->whereNotIn('status', ['trip_completed', 'completed', 'cancelled'])
+                ->orderByDesc('accepted_at')
+                ->first();
+        }
+
         $driverUpdates = [];
 
         foreach (['latitude' => 'lat', 'longitude' => 'lng', 'heading' => 'heading', 'speed' => 'speed'] as $in => $col) {
@@ -524,19 +537,6 @@ class DriverOperationsController extends Controller
             } catch (\Throwable $e) {
                 // Non-blocking telemetry history write
             }
-        }
-
-        $bookingRef = $request->input('booking_reference');
-        $activeBooking = null;
-        if (is_string($bookingRef) && $bookingRef !== '') {
-            $activeBooking = BookingController::findBookingByKey($bookingRef);
-        }
-        if (!$activeBooking) {
-            $activeBooking = Booking::with('driver')
-                ->where('driver_id', $driver->id)
-                ->whereNotIn('status', ['trip_completed', 'completed', 'cancelled'])
-                ->orderByDesc('accepted_at')
-                ->first();
         }
 
         $locationPayload = [
