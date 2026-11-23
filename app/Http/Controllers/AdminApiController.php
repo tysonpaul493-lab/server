@@ -18,169 +18,40 @@ use Illuminate\Support\Facades\Hash;
 class AdminApiController extends Controller
 {
     /**
+     * Resolve authenticated admin from bearer token or header
+     */
+    public static function resolveAdmin(Request $request): ?Admin
+    {
+        $token = $request->bearerToken()
+            ?: (string) ($request->header('X-Admin-Token') ?: $request->input('admin_token') ?: '');
+        if (!$token) {
+            return null;
+        }
+        return Admin::where('api_token', $token)->first();
+    }
+
+    /**
      * Admin Authentication
      */
     public function login(Request $request): JsonResponse
     {
-        $email = strtolower(trim((string) $request->input('email', 'admin@ambulance.gov')));
+        $email = strtolower(trim((string) $request->input('email', '')));
         $password = (string) $request->input('password', '');
         $mfaCode = (string) $request->input('mfa_code', '');
 
-        // 1. Query database `admins` table first
+        if (empty($email) || empty($password)) {
+            return response()->json(['success' => false, 'message' => 'Email and password are required.'], 400);
+        }
+
+        // 1. Authenticate against MySQL `admins` table with bcrypt hash
         $admin = Admin::where('email', $email)->first();
 
-        // Fallback matrix for seeded / test administrators
-        $credentials = [
-            'admin@gmail.com' => [
-                'name' => 'Super Administrator',
-                'role' => 'super_admin',
-                'role_name' => 'Super Administrator',
-                'password' => 'Admin@1234',
-                'mfa_enabled' => false,
-            ],
-            'staff.admin@liferoute.org' => [
-                'name' => 'Command Center Administrator',
-                'role' => 'super_admin',
-                'role_name' => 'Super Administrator',
-                'password' => 'Admin@1234',
-                'mfa_enabled' => false,
-            ],
-            'admin@liferoute.com' => [
-                'name' => 'Chief Operations Officer',
-                'role' => 'super_admin',
-                'role_name' => 'Super Administrator',
-                'password' => 'Admin@1234',
-                'mfa_enabled' => false,
-            ],
-            'admin@liferoute.org' => [
-                'name' => 'Dispatch Director',
-                'role' => 'super_admin',
-                'role_name' => 'Super Administrator',
-                'password' => 'Admin@1234',
-                'mfa_enabled' => false,
-            ],
-            'admin@admin.com' => [
-                'name' => 'Systems Administrator',
-                'role' => 'super_admin',
-                'role_name' => 'Super Administrator',
-                'password' => 'Admin@1234',
-                'mfa_enabled' => false,
-            ],
-            'admin@ambulance.gov' => [
-                'name' => 'Commander Sarah Jenkins',
-                'role' => 'super_admin',
-                'role_name' => 'Super Administrator',
-                'password' => 'AdminSecure2026!',
-                'mfa_enabled' => true,
-            ],
-            'dispatch@ambulance.gov' => [
-                'name' => 'Officer David Ross',
-                'role' => 'dispatcher',
-                'role_name' => 'Senior Dispatcher',
-                'password' => 'DispatchSecure2026!',
-                'mfa_enabled' => false,
-            ],
-            'verifier@ambulance.gov' => [
-                'name' => 'Marcus Chen',
-                'role' => 'driver_verifier',
-                'role_name' => 'Driver Verification Officer',
-                'password' => 'VerifierSecure2026!',
-                'mfa_enabled' => false,
-            ],
-            'hospital@ambulance.gov' => [
-                'name' => 'Dr. Robert Vance',
-                'role' => 'hospital_manager',
-                'role_name' => 'Hospital Network Director',
-                'password' => 'HospitalSecure2026!',
-                'mfa_enabled' => false,
-            ],
-            'support@ambulance.gov' => [
-                'name' => 'Elena Rostova',
-                'role' => 'support_staff',
-                'role_name' => 'Customer Support Lead',
-                'password' => 'SupportSecure2026!',
-                'mfa_enabled' => false,
-            ],
-        ];
-
-        if ($admin) {
-            $isPwValid = Hash::check($password, $admin->password)
-                || $password === 'Admin@1234'
-                || $password === 'AdminSecure2026!'
-                || $password === 'DispatchSecure2026!'
-                || $password === 'VerifierSecure2026!'
-                || $password === 'HospitalSecure2026!'
-                || $password === 'SupportSecure2026!';
-
-            if (!$isPwValid) {
-                return response()->json(['success' => false, 'message' => 'Incorrect password provided.'], 401);
-            }
-
-            if ($admin->mfa_enabled && empty($mfaCode)) {
-                return response()->json([
-                    'success' => true,
-                    'mfa_required' => true,
-                    'message' => 'Two-Factor TOTP code required.',
-                ]);
-            }
-
-            if ($admin->mfa_enabled && $mfaCode !== '123456') {
-                return response()->json(['success' => false, 'message' => 'Invalid 2FA code.'], 401);
-            }
-
-            $admin->update(['last_login_at' => now()]);
-
-            try {
-                AuditLog::create([
-                    'admin_id' => $admin->id,
-                    'admin_name' => $admin->name,
-                    'action' => 'ADMIN_LOGIN',
-                    'entity_type' => 'Admin',
-                    'entity_id' => (string) $admin->id,
-                    'details' => ['email' => $admin->email, 'role' => $admin->role],
-                    'ip_address' => $request->ip(),
-                ]);
-            } catch (\Throwable $e) {}
-
-            $token = 'admin_session_' . md5($email . now()->timestamp);
-            $userData = [
-                'id' => (int) $admin->id,
-                'name' => $admin->name,
-                'email' => $admin->email,
-                'role' => $admin->role,
-                'role_name' => $admin->role_name,
-                'mfa_enabled' => (bool) $admin->mfa_enabled,
-                'last_login_at' => ($admin->last_login_at ?: now())->toIso8601String(),
-            ];
-
-            return response()->json([
-                'success' => true,
-                'token' => $token,
-                'user' => $userData,
-                'message' => 'Administrative session initialized successfully.',
-            ]);
+        if (!$admin || !Hash::check($password, $admin->password)) {
+            return response()->json(['success' => false, 'message' => 'Invalid email or password.'], 401);
         }
 
-        $account = $credentials[$email] ?? null;
-        if (!$account) {
-            $user = User::where('email', $email)->first();
-            if (!$user) {
-                return response()->json(['success' => false, 'message' => 'Invalid email or password.'], 401);
-            }
-            $account = [
-                'name' => $user->name,
-                'role' => 'super_admin',
-                'role_name' => 'Super Administrator',
-                'password' => 'AdminSecure2026!',
-                'mfa_enabled' => false,
-            ];
-        }
-
-        if ($password !== $account['password'] && $password !== 'Admin@1234' && $password !== 'AdminSecure2026!' && $password !== 'Password@123') {
-            return response()->json(['success' => false, 'message' => 'Incorrect password provided.'], 401);
-        }
-
-        if ($account['mfa_enabled'] && empty($mfaCode)) {
+        // 2. Multi-Factor Authentication check
+        if ($admin->mfa_enabled && empty($mfaCode)) {
             return response()->json([
                 'success' => true,
                 'mfa_required' => true,
@@ -188,27 +59,47 @@ class AdminApiController extends Controller
             ]);
         }
 
-        if ($account['mfa_enabled'] && $mfaCode !== '123456') {
-            return response()->json(['success' => false, 'message' => 'Invalid 2FA code.'], 401);
+        if ($admin->mfa_enabled && !empty($mfaCode)) {
+            // Verify TOTP or stored MFA secret
+            $validMfa = false;
+            if (!empty($admin->mfa_secret)) {
+                $validMfa = hash_equals($admin->mfa_secret, $mfaCode);
+            }
+            // In test environment, allow verified testing TOTP
+            if (app()->environment('testing', 'local') && in_array($mfaCode, ['123456', '654321'], true)) {
+                $validMfa = true;
+            }
+            if (!$validMfa) {
+                return response()->json(['success' => false, 'message' => 'Invalid Two-Factor authentication code.'], 401);
+            }
         }
 
-        $token = 'admin_session_' . md5($email . now()->timestamp);
-        $userData = [
-            'id' => 1,
-            'name' => $account['name'],
-            'email' => $email,
-            'role' => $account['role'],
-            'role_name' => $account['role_name'],
-            'mfa_enabled' => $account['mfa_enabled'],
-            'last_login_at' => now()->toIso8601String(),
-        ];
+        // 3. Cryptographically secure session token
+        $token = 'admin_' . bin2hex(random_bytes(32));
+        $admin->update([
+            'api_token' => $token,
+            'last_login_at' => now(),
+        ]);
+
+        try {
+            AuditLog::create([
+                'admin_id' => $admin->id,
+                'admin_name' => $admin->name,
+                'action' => 'ADMIN_LOGIN',
+                'entity_type' => 'Admin',
+                'entity_id' => (string) $admin->id,
+                'details' => ['email' => $admin->email, 'role' => $admin->role],
+                'ip_address' => $request->ip(),
+            ]);
+        } catch (\Throwable $e) {}
 
         return response()->json([
             'success' => true,
             'token' => $token,
-            'user' => $userData,
+            'user' => $admin->toAuthPayload(),
             'message' => 'Administrative session initialized successfully.',
         ]);
+    }
     }
 
     public function logout(): JsonResponse
@@ -239,22 +130,20 @@ class AdminApiController extends Controller
         $cancelledTrips = Booking::where('status', 'cancelled')->count();
 
         // Real-time Revenue metrics directly computed from DB
-        $dbRevenue = (float) Booking::whereIn('status', ['trip_completed', 'completed'])->sum('earnings');
-        $totalRevenue = $dbRevenue > 0 ? $dbRevenue : (float) (max(1, $completedTrips) * 1250);
-
-        $dbTodayRevenue = (float) Booking::whereIn('status', ['trip_completed', 'completed'])
+        $totalRevenue = (float) Booking::whereIn('status', ['trip_completed', 'completed'])->sum('earnings');
+        $todayRevenue = (float) Booking::whereIn('status', ['trip_completed', 'completed'])
             ->whereDate('created_at', today())
             ->sum('earnings');
         $todayCompleted = Booking::whereIn('status', ['trip_completed', 'completed'])
             ->whereDate('created_at', today())
             ->count();
-        $todayRevenue = $dbTodayRevenue > 0 ? $dbTodayRevenue : (float) ($todayCompleted * 1250);
 
-        // Total ambulances based on registered driver vehicles
-        $totalAmbulances = max($totalDrivers, 3);
+        // Total ambulances based on registered fleet in MySQL ambulances / drivers
+        $registeredAmbulances = Ambulance::count();
+        $totalAmbulances = $registeredAmbulances > 0 ? $registeredAmbulances : $totalDrivers;
         $busyAmbulances = $busyDrivers;
         $availableAmbulances = $availableDrivers;
-        $maintenanceAmbulances = 0;
+        $maintenanceAmbulances = Ambulance::where('status', 'maintenance')->count();
 
         // Fetch recent active bookings for dashboard activity
         $recentBookings = Booking::with('driver')

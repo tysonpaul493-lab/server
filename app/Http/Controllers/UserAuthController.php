@@ -49,16 +49,23 @@ class UserAuthController extends Controller
 
         $sms = SmsGatewayService::dispatchOtp($phone, $otp);
 
-        return response()->json([
+        $isLocal = app()->environment('local', 'testing');
+
+        $response = [
             'status' => 'success',
             'message' => $sms['sent']
                 ? "SMS verification code sent to {$phone}."
                 : "Verification code generated for {$phone}.",
             'otp_expires_in' => 300,
             'sms_dispatched' => $sms['sent'],
-            'verification_code' => $sms['sent'] ? null : $otp,
-            'dev_otp' => $otp,
-        ]);
+        ];
+
+        if ($isLocal && !$sms['sent']) {
+            $response['verification_code'] = $otp;
+            $response['dev_otp'] = $otp;
+        }
+
+        return response()->json($response);
     }
 
     public function verifyOtp(Request $request): JsonResponse
@@ -117,7 +124,8 @@ class UserAuthController extends Controller
             }
         }
 
-        $token = 'sanctum_token_'.base64_encode($phone.':'.((int) (microtime(true) * 1000)));
+        $token = 'sanctum_user_' . bin2hex(random_bytes(32));
+        $user->forceFill(['remember_token' => $token])->save();
 
         return response()->json([
             'status' => 'success',
@@ -316,7 +324,8 @@ class UserAuthController extends Controller
             }
         }
 
-        $token = 'sanctum_token_'.base64_encode($digits.':'.((int) (microtime(true) * 1000)));
+        $token = 'sanctum_user_' . bin2hex(random_bytes(32));
+        $user->forceFill(['remember_token' => $token])->save();
 
         return response()->json([
             'status' => 'success',
@@ -373,7 +382,8 @@ class UserAuthController extends Controller
             ]);
         }
 
-        $token = 'sanctum_token_'.base64_encode($digits.':'.((int) (microtime(true) * 1000)));
+        $token = 'sanctum_user_' . bin2hex(random_bytes(32));
+        $user->forceFill(['remember_token' => $token])->save();
 
         return response()->json([
             'status' => 'success',

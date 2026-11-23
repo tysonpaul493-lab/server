@@ -11,18 +11,37 @@ class HospitalController extends Controller
 {
     public function nearby(Request $request): JsonResponse
     {
-        $userLat = (float) ($request->query('lat') ?: 11.0318);
-        $userLng = (float) ($request->query('lng') ?: 76.9437);
+        $hasCoords = $request->has('lat') && $request->has('lng') && is_numeric($request->query('lat')) && is_numeric($request->query('lng'));
+        $userLat = $hasCoords ? (float) $request->query('lat') : null;
+        $userLng = $hasCoords ? (float) $request->query('lng') : null;
 
-        $hospitals = Hospital::where('verified', true)->get();
+        $searchTerm = trim((string) ($request->query('search') ?: $request->query('name') ?: ''));
+        $specialty = trim((string) ($request->query('specialty') ?: $request->query('service') ?: ''));
 
-        if ($hospitals->isEmpty()) {
-            $hospitals = Hospital::all();
+        $query = Hospital::query();
+
+        if ($searchTerm !== '') {
+            $query->where(function ($q) use ($searchTerm) {
+                $q->where('name', 'like', "%{$searchTerm}%")
+                  ->orWhere('address', 'like', "%{$searchTerm}%");
+            });
         }
 
+        if ($specialty !== '') {
+            $query->where(function ($q) use ($specialty) {
+                $q->where('trauma_level', 'like', "%{$specialty}%")
+                  ->orWhereJsonContains('emergency_services', $specialty)
+                  ->orWhere('emergency_services', 'like', "%{$specialty}%");
+            });
+        }
+
+        $hospitals = $query->get();
+
         $results = $hospitals->map(function (Hospital $h) use ($userLat, $userLng) {
-            $dist = PhoneHelper::calculateDrivingDistanceKm($userLat, $userLng, (float) $h->lat, (float) $h->lng);
-            $driveTimeMin = max(2, min(60, (int) ceil($dist * 2.4)));
+            $dist = ($userLat !== null && $userLng !== null)
+                ? PhoneHelper::calculateDrivingDistanceKm($userLat, $userLng, (float) $h->lat, (float) $h->lng)
+                : null;
+            $driveTimeMin = $dist !== null ? max(2, min(90, (int) ceil($dist * 2.4))) : null;
 
             return [
                 'id' => (string) ($h->slug ?: $h->id),
@@ -32,7 +51,7 @@ class HospitalController extends Controller
                 'lat' => (float) $h->lat,
                 'lng' => (float) $h->lng,
                 'emergency_phone' => $h->emergency_phone ?: '108',
-                'emergency_services' => is_array($h->emergency_services) ? $h->emergency_services : ['Free 108 Emergency', 'Level 1 Trauma Care', '24x7 Casualty', '100-Bed Emergency ICU'],
+                'emergency_services' => is_array($h->emergency_services) ? $h->emergency_services : [],
                 'has_trauma_center' => (bool) $h->has_trauma_center,
                 'has_icu_bed' => (bool) $h->has_icu_bed,
                 'trauma_level' => $h->trauma_level,
@@ -40,12 +59,16 @@ class HospitalController extends Controller
                 'total_icu_beds' => (int) $h->total_icu_beds,
                 'available_general_beds' => (int) $h->available_general_beds,
                 'total_general_beds' => (int) $h->total_general_beds,
-                'distance_km' => round($dist, 1),
-                'estimated_drive_time' => "{$driveTimeMin} min",
+                'distance_km' => $dist !== null ? round($dist, 1) : null,
+                'estimated_drive_time' => $driveTimeMin !== null ? "{$driveTimeMin} min" : 'Location required',
+                'verified' => (bool) $h->verified,
+                'data_verified_at' => $h->updated_at ? $h->updated_at->toIso8601String() : now()->toIso8601String(),
             ];
         })->toArray();
 
-        usort($results, static fn (array $a, array $b) => $a['distance_km'] <=> $b['distance_km']);
+        if ($userLat !== null && $userLng !== null) {
+            usort($results, static fn (array $a, array $b) => ($a['distance_km'] ?? 9999) <=> ($b['distance_km'] ?? 9999));
+        }
 
         return response()->json([
             'status' => 'success',

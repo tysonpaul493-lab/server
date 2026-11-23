@@ -211,4 +211,147 @@ class LifeRouteApiTest extends TestCase
         $this->withToken($driverToken)->getJson('/api/v1/driver/trips/history')->assertOk()->assertJsonCount(1, 'trips');
         $this->assertDatabaseHas('bookings', ['id' => $bookingId, 'status' => 'trip_completed']);
     }
+
+    public function test_booking_creation_rejects_missing_or_zero_gps(): void
+    {
+        // 0.0, 0.0 coordinates must be rejected with 422
+        $this->postJson('/api/bookings', [
+            'patient_name' => 'Ramesh Test',
+            'patient_phone' => '+91 98765 00000',
+            'pickup_address' => 'Empty GPS Location',
+            'pickup_lat' => 0.0,
+            'pickup_lng' => 0.0,
+        ])->assertStatus(422)->assertJsonValidationErrors(['pickup_lat', 'pickup_lng']);
+
+        // Missing coordinates must be rejected with 422
+        $this->postJson('/api/bookings', [
+            'patient_name' => 'Ramesh Test',
+            'patient_phone' => '+91 98765 00000',
+            'pickup_address' => 'Null GPS Location',
+        ])->assertStatus(422)->assertJsonValidationErrors(['pickup_lat', 'pickup_lng']);
+    }
+
+    public function test_trip_longer_than_fifteen_minutes_is_not_auto_completed(): void
+    {
+        $reg = $this->postJson('/api/v1/driver/auth/register', [
+            'name' => 'Long Journey Pilot',
+            'phone' => '9444455555',
+            'ambulance' => [
+                'registration_number' => 'TN-01-XX-9999',
+                'vehicle_type' => 'icu',
+            ],
+        ])->assertOk();
+        $driverToken = $reg->json('token');
+        $driverId = $reg->json('driver.id');
+
+        $created = $this->postJson('/api/bookings', [
+            'patient_name' => 'Critical Patient',
+            'patient_phone' => '+91 91111 22222',
+            'pickup_address' => 'Highways Junction',
+            'pickup_lat' => 11.0168,
+            'pickup_lng' => 76.9558,
+            'status' => 'en_route_to_pickup',
+        ])->assertCreated();
+
+        $bookingId = $created->json('booking.id');
+
+        // Simulate that trip was created 25 minutes ago
+        \App\Models\Booking::where('id', $bookingId)->update([
+            'driver_id' => $driverId,
+            'status' => 'in_transit_to_hospital',
+            'created_at' => now()->subMinutes(25),
+            'updated_at' => now()->subMinutes(20),
+        ]);
+
+        // Calling pendingRequests must NEVER auto-complete active trips
+        $this->withToken($driverToken)
+            ->getJson('/api/v1/driver/requests/pending')
+            ->assertOk();
+
+        $booking = \App\Models\Booking::find($bookingId);
+        $this->assertSame('in_transit_to_hospital', $booking->status);
+        $this->assertNotEquals('trip_completed', $booking->status);
+    }
+
+    public function test_driver_cannot_access_or_update_another_drivers_trip(): void
+    {
+        $driver1 = $this->postJson('/api/v1/driver/auth/register', [
+            'name' => 'Driver One',
+            'phone' => '9777711111',
+            'ambulance' => ['registration_number' => 'TN-11-AA-1111', 'vehicle_type' => 'als'],
+        ])->assertOk();
+        $token1 = $driver1->json('token');
+
+        $driver2 = $this->postJson('/api/v1/driver/auth/register', [
+            'name' => 'Driver Two',
+            'phone' => '9777722222',
+            'ambulance' => ['registration_number' => 'TN-22-BB-2222', 'vehicle_type' => 'bls'],
+        ])->assertOk();
+        $token2 = $driver2->json('token');
+
+        $booking = $this->postJson('/api/bookings', [
+            'patient_name' => 'Protected Patient',
+            'patient_phone' => '+91 97777 33333',
+            'pickup_address' => 'Driver One Sector',
+            'pickup_lat' => 11.02,
+            'pickup_lng' => 76.96,
+        ])->assertCreated();
+        $bookingId = $booking->json('booking.id');
+
+        // Driver 1 accepts booking
+        $this->withToken($token1)
+            ->postJson("/api/v1/driver/requests/{$bookingId}/accept")
+            ->assertOk();
+
+        // Driver 2 attempts to inspect Driver 1's trip -> 403 Forbidden
+        $this->withToken($token2)
+            ->getJson("/api/v1/driver/trips/{$bookingId}")
+            ->assertStatus(403);
+
+        // Driver 2 attempts to change Driver 1's trip status -> 403 Forbidden
+        $this->withToken($token2)
+            ->patchJson("/api/v1/driver/trips/{$bookingId}/status", [
+                'status' => 'trip_completed',
+            ])->assertStatus(403);
+    }
+
+    public function test_user_cannot_cancel_another_users_booking(): void
+    {
+        // User 1 signs up and books ambulance
+        $user1Otp = $this->postJson('/api/auth/otp/send', ['phone' => '9888811111'])->assertOk();
+        $u1Token = $this->postJson('/api/auth/otp/verify', [
+            'phone' => '9888811111',
+            'otp' => $user1Otp->json('dev_otp'),
+        ])->assertOk()->json('token');
+
+        $booking = $this->withToken($u1Token)->postJson('/api/bookings', [
+            'patient_name' => 'User One Patient',
+            'patient_phone' => '+91 98888 11111',
+            'pickup_address' => 'User One Residence',
+            'pickup_lat' => 11.05,
+            'pickup_lng' => 76.98,
+        ])->assertCreated();
+        $bookingId = $booking->json('booking.id');
+
+        // User 2 signs up
+        $user2Otp = $this->postJson('/api/auth/otp/send', ['phone' => '9888822222'])->assertOk();
+        $u2Token = $this->postJson('/api/auth/otp/verify', [
+            'phone' => '9888822222',
+            'otp' => $user2Otp->json('dev_otp'),
+        ])->assertOk()->json('token');
+
+        // User 2 tries to cancel User 1's booking -> 403 Forbidden
+        $this->withToken($u2Token)
+            ->postJson("/api/bookings/{$bookingId}/cancel", [
+                'reason' => 'Malicious unauthorized cancellation attempt',
+            ])->assertStatus(403);
+
+        // User 1 can cancel their own booking
+        $this->withToken($u1Token)
+            ->postJson("/api/bookings/{$bookingId}/cancel", [
+                'reason' => 'Patient stabilized by family doctor',
+            ])->assertOk()->assertJsonPath('status', 'success');
+
+        $this->assertSame('cancelled', \App\Models\Booking::find($bookingId)->status);
+    }
 }

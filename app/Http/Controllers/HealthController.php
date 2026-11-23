@@ -33,15 +33,29 @@ class HealthController extends Controller
     {
         $channelName = (string) $request->input('channel_name', '');
         $socketId = (string) $request->input('socket_id', '');
-        $authKey = "{$socketId}:{$channelName}:auth_ok";
         $driver = DriverAuthResolver::resolveDriver($request);
 
-        return response()->json([
-            'auth' => config('liferoute.reverb_app_key').':'.$authKey,
-            'channel_data' => json_encode([
+        $appKey = (string) config('liferoute.reverb_app_key', 'liferoute_key');
+        $appSecret = (string) config('liferoute.reverb_app_secret', 'liferoute_secret');
+
+        $channelData = null;
+        if (str_starts_with($channelName, 'presence-')) {
+            $channelData = json_encode([
                 'user_id' => $driver?->id ?? 0,
-                'user_info' => ['name' => $driver?->name ?? ''],
-            ]),
-        ]);
+                'user_info' => ['name' => $driver?->name ?? 'User'],
+            ]);
+        }
+
+        $stringToSign = $socketId . ':' . $channelName . ($channelData ? ':' . $channelData : '');
+        $signature = hash_hmac('sha256', $stringToSign, $appSecret);
+
+        $response = [
+            'auth' => $appKey . ':' . $signature,
+        ];
+        if ($channelData) {
+            $response['channel_data'] = $channelData;
+        }
+
+        return response()->json($response);
     }
 }

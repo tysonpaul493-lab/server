@@ -18,6 +18,7 @@ class User extends Authenticatable
         'emergency_notes',
         'email',
         'password',
+        'remember_token',
     ];
 
     protected $hidden = [

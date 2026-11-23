@@ -107,13 +107,7 @@ class DriverOperationsController extends Controller
             ]);
         }
 
-        // 2. Strict exclusivity: Drivers currently on a FRESH active trip (< 15 minutes) must not receive new requests
-        $staleThreshold = now()->subMinutes(15);
-        Booking::where('driver_id', $driver->id)
-            ->whereNotIn('status', ['trip_completed', 'completed', 'cancelled'])
-            ->where('created_at', '<', $staleThreshold)
-            ->update(['status' => 'trip_completed', 'completed_at' => now()]);
-
+        // 2. Strict exclusivity: Drivers currently on an ongoing active trip must not receive new requests
         $hasActiveTrip = Booking::where('driver_id', $driver->id)
             ->whereNotIn('status', ['trip_completed', 'completed', 'cancelled'])
             ->exists();
@@ -330,11 +324,24 @@ class DriverOperationsController extends Controller
         ]);
     }
 
-    public function showTrip(string $id): JsonResponse
+    public function showTrip(Request $request, string $id): JsonResponse
     {
+        $driver = DriverAuthResolver::resolveDriver($request);
+        if (!$driver) {
+            return response()->json(['status' => 'error', 'message' => 'Unauthenticated driver session.'], 401);
+        }
+
         $booking = BookingController::findBookingByKey($id);
         if (!$booking) {
             return response()->json(['status' => 'error', 'message' => 'Trip not found.'], 404);
+        }
+
+        // Authorization: Driver must only access their own assigned trip or pending unassigned requests
+        if ($booking->driver_id !== null && (int) $booking->driver_id !== (int) $driver->id) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Unauthorized: Cannot access another driver\'s emergency trip.',
+            ], 403);
         }
 
         return response()->json([
@@ -345,14 +352,22 @@ class DriverOperationsController extends Controller
 
     public function updateTripStatus(Request $request, string $id): JsonResponse
     {
+        $driver = DriverAuthResolver::resolveDriver($request);
+        if (!$driver) {
+            return response()->json(['status' => 'error', 'message' => 'Unauthenticated driver session.'], 401);
+        }
+
         $booking = BookingController::findBookingByKey($id);
         if (!$booking) {
             return response()->json(['status' => 'error', 'message' => 'Trip not found.'], 404);
         }
 
-        $driver = DriverAuthResolver::resolveDriver($request);
-        if (!$driver) {
-            return response()->json(['status' => 'error', 'message' => 'Unauthenticated driver session.'], 401);
+        // Security check: Driver can only update the status of trips explicitly assigned to their unit
+        if ((int) $booking->driver_id !== (int) $driver->id) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Unauthorized: This emergency trip is not assigned to your ambulance unit.',
+            ], 403);
         }
         $lat = $request->input('latitude');
         $lng = $request->input('longitude');

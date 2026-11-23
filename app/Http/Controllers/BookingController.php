@@ -23,8 +23,32 @@ class BookingController extends Controller
         $bookingId = 'BK-'.$numericId;
         $referenceNumber = '#LR-'.$numericId;
 
-        $pickupLat = (float) ($data['pickup_lat'] ?? $data['pickup_latitude'] ?? 12.9716) ?: 12.9716;
-        $pickupLng = (float) ($data['pickup_lng'] ?? $data['pickup_longitude'] ?? 77.5946) ?: 77.5946;
+        $rawLat = $data['pickup_lat'] ?? $data['pickup_latitude'] ?? null;
+        $rawLng = $data['pickup_lng'] ?? $data['pickup_longitude'] ?? null;
+
+        if ($rawLat === null || $rawLng === null || (!is_numeric($rawLat) || !is_numeric($rawLng))) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Valid pickup GPS coordinates (latitude and longitude) are required for emergency dispatch.',
+                'errors' => [
+                    'pickup_lat' => ['Valid pickup latitude is required.'],
+                    'pickup_lng' => ['Valid pickup longitude is required.'],
+                ],
+            ], 422);
+        }
+
+        $pickupLat = (float) $rawLat;
+        $pickupLng = (float) $rawLng;
+        if ($pickupLat === 0.0 && $pickupLng === 0.0) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Valid non-zero GPS coordinates are required.',
+                'errors' => [
+                    'pickup_lat' => ['Pickup coordinates cannot be 0, 0.'],
+                    'pickup_lng' => ['Pickup coordinates cannot be 0, 0.'],
+                ],
+            ], 422);
+        }
 
         $destInput = $data['destination_hospital'] ?? null;
         $isDestObj = is_array($destInput);
@@ -37,11 +61,11 @@ class BookingController extends Controller
             : 'Casualty & Emergency Bay';
 
         $destLat = $isDestObj
-            ? ((float) ($destInput['lat'] ?? $destInput['latitude'] ?? 0) ?: ($pickupLat + 0.015))
-            : ((float) ($data['destination_latitude'] ?? $data['destination_lat'] ?? 0) ?: ($pickupLat + 0.015));
+            ? (float) ($destInput['lat'] ?? $destInput['latitude'] ?? ($pickupLat + 0.015))
+            : (float) ($data['destination_latitude'] ?? $data['destination_lat'] ?? ($pickupLat + 0.015));
         $destLng = $isDestObj
-            ? ((float) ($destInput['lng'] ?? $destInput['longitude'] ?? 0) ?: ($pickupLng + 0.012))
-            : ((float) ($data['destination_longitude'] ?? $data['destination_lng'] ?? 0) ?: ($pickupLng + 0.012));
+            ? (float) ($destInput['lng'] ?? $destInput['longitude'] ?? ($pickupLng + 0.012))
+            : (float) ($data['destination_longitude'] ?? $data['destination_lng'] ?? ($pickupLng + 0.012));
 
         $patientPhone = trim((string) ($data['callback_phone'] ?? $data['patient_phone'] ?? ''));
         $patientName = trim((string) ($data['patient_name'] ?? ''));
@@ -70,14 +94,7 @@ class BookingController extends Controller
             'estimated_drive_time' => $hospitalEtaMin.' min',
         ];
 
-        // Critical dispatch rule: Auto-complete stale trips older than 15 minutes
-        $staleThreshold = now()->subMinutes(15);
-        Booking::whereNotNull('driver_id')
-            ->whereNotIn('status', ['trip_completed', 'completed', 'cancelled'])
-            ->where('created_at', '<', $staleThreshold)
-            ->update(['status' => 'trip_completed', 'completed_at' => now()]);
-
-        // Exclude drivers who currently have a fresh active emergency trip
+        // Exclude drivers who currently have an ongoing emergency trip
         $busyDriverIds = Booking::whereNotNull('driver_id')
             ->whereNotIn('status', ['trip_completed', 'completed', 'cancelled'])
             ->pluck('driver_id')
@@ -217,8 +234,46 @@ class BookingController extends Controller
         $reason = (string) ($request->input('reason') ?: 'Cancelled by user');
         $booking = $this->findBookingByKey($id);
 
-        if ($booking) {
-            $driverId = $booking->driver_id;
+        if (!$booking) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Booking not found.',
+            ], 404);
+        }
+
+        // Ownership authorization check: authenticated user via token or X-User-Phone
+        $user = $request->user();
+        if (!$user) {
+            $token = $request->bearerToken();
+            if ($token) {
+                $user = \App\Models\User::where('remember_token', $token)->first();
+            }
+        }
+
+        if ($user && !empty($booking->callback_phone)) {
+            $userNorm = PhoneHelper::normalizePhone10($user->phone);
+            $bookingNorm = PhoneHelper::normalizePhone10($booking->callback_phone);
+            if ($userNorm && $bookingNorm && $userNorm !== $bookingNorm) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Unauthorized: You are only permitted to cancel your own emergency booking.',
+                ], 403);
+            }
+        }
+
+        $callerPhone = trim((string) ($request->input('phone') ?? $request->header('X-User-Phone') ?? ''));
+        if (!empty($callerPhone) && !empty($booking->callback_phone)) {
+            $callerNorm = PhoneHelper::normalizePhone10($callerPhone);
+            $bookingNorm = PhoneHelper::normalizePhone10($booking->callback_phone);
+            if ($callerNorm && $bookingNorm && $callerNorm !== $bookingNorm) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Unauthorized: You are only permitted to cancel your own emergency booking.',
+                ], 403);
+            }
+        }
+
+        $driverId = $booking->driver_id;
 
             $booking->update([
                 'status' => 'cancelled',
@@ -249,14 +304,13 @@ class BookingController extends Controller
                 'emergency-broadcasts',
             ];
 
-            if ($driverId) {
-                $channels[] = 'private-driver.'.$driverId;
-            }
-
-            WebSocketBroadcaster::broadcast($channels, 'BookingCancelled', $cancelPayload);
-            WebSocketBroadcaster::broadcast($channels, 'TripCancelled', $cancelPayload);
-            WebSocketBroadcaster::broadcast($channels, 'TripStatusUpdated', $cancelPayload);
+        if ($driverId) {
+            $channels[] = 'private-driver.'.$driverId;
         }
+
+        WebSocketBroadcaster::broadcast($channels, 'BookingCancelled', $cancelPayload);
+        WebSocketBroadcaster::broadcast($channels, 'TripCancelled', $cancelPayload);
+        WebSocketBroadcaster::broadcast($channels, 'TripStatusUpdated', $cancelPayload);
 
         return response()->json([
             'status' => 'success',
