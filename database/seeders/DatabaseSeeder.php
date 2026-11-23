@@ -240,16 +240,16 @@ class DatabaseSeeder extends Seeder
 
         // 4. Seed Verified Duty Driver
         Driver::updateOrCreate(
-            ['phone_key' => '8428304510'],
+            ['phone_key' => '9840010801'],
             [
                 'name' => 'Paramedic Rajesh Kumar',
-                'phone' => '+91 84283 04510',
+                'phone' => '+91 98400 10801',
                 'vehicle_number' => 'TN-01-EA-1080',
                 'vehicle_plate' => 'TN-01-EA-1080',
                 'vehicle_type' => 'als',
                 'vehicle_type_display' => 'Advanced Life Support (ALS)',
                 'vehicle_model' => 'Force Traveller ICU Ambulance',
-                'license_number' => 'TN-38-20180004510',
+                'license_number' => 'TN-38-20180001080',
                 'verification_status' => 'approved',
                 'is_online' => true,
                 'lat' => 11.0210,

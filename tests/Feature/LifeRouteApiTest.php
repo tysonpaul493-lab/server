@@ -107,15 +107,15 @@ class LifeRouteApiTest extends TestCase
         ])->assertOk();
         $driverToken = $reg->json('token');
 
-        $userOtp = $this->postJson('/api/auth/otp/send', ['phone' => '8428304510'])->assertOk();
+        $userOtp = $this->postJson('/api/auth/otp/send', ['phone' => '9840010801'])->assertOk();
         $code = $userOtp->json('dev_otp');
 
-        $this->postJson('/api/auth/otp/verify', ['phone' => '8428304510', 'otp' => $code])
+        $this->postJson('/api/auth/otp/verify', ['phone' => '9840010801', 'otp' => $code])
             ->assertOk()
             ->assertJsonPath('status', 'success')
             ->assertJsonPath('user.name', '');
 
-        $this->putJson('/api/user/profile', ['phone' => '8428304510', 'name' => 'Anil Kumar'])
+        $this->putJson('/api/user/profile', ['phone' => '9840010801', 'name' => 'Anil Kumar'])
             ->assertOk()
             ->assertJsonPath('user.name', 'Anil Kumar');
 

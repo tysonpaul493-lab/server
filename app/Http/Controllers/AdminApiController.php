@@ -100,7 +100,6 @@ class AdminApiController extends Controller
             'message' => 'Administrative session initialized successfully.',
         ]);
     }
-    }
 
     public function logout(): JsonResponse
     {
@@ -1020,7 +1019,7 @@ class AdminApiController extends Controller
                         'booking_id' => (int) $activeBooking->id,
                         'booking_reference' => $activeBooking->booking_reference ?: '#BK-' . $activeBooking->id,
                         'user_name' => $activeBooking->patient_name ?: 'Emergency Caller',
-                        'user_phone' => $activeBooking->callback_phone ?: '+91 8428304510',
+                        'user_phone' => $activeBooking->callback_phone ?: '',
                         'driver_name' => $driver ? $driver->name : 'Pilot',
                         'driver_phone' => $driver ? $driver->phone : '108',
                         'severity' => strtoupper((string) ($activeBooking->emergency_category ?: 'CRITICAL')),
@@ -1094,7 +1093,7 @@ class AdminApiController extends Controller
                     'booking_id' => (int) $activeBooking->id,
                     'booking_reference' => $activeBooking->booking_reference ?: '#BK-' . $activeBooking->id,
                     'user_name' => $activeBooking->patient_name ?: 'Emergency Caller',
-                    'user_phone' => $activeBooking->callback_phone ?: '+91 8428304510',
+                    'user_phone' => $activeBooking->callback_phone ?: '',
                     'driver_name' => $d->name,
                     'driver_phone' => $d->phone,
                     'severity' => strtoupper((string) ($activeBooking->emergency_category ?: 'CRITICAL')),
@@ -1137,7 +1136,7 @@ class AdminApiController extends Controller
             'booking_reference' => $b->booking_reference ?: '#BK-' . $b->id,
             'user_id' => $matchedUserId,
             'requester_name' => $b->patient_name ?: 'Emergency Caller (SIM Verified)',
-            'requester_phone' => $b->callback_phone ?: '+91 8428304510',
+            'requester_phone' => $b->callback_phone ?: '',
             'patient_name' => $b->patient_name ?: 'Emergency Patient',
             'patient_age' => 42,
             'patient_gender' => 'Emergency Patient',

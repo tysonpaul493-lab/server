@@ -5,10 +5,12 @@ namespace App\Http\Controllers;
 use App\Models\Booking;
 use App\Models\Driver;
 use App\Models\DriverNotification;
+use App\Models\User;
 use App\Services\PhoneHelper;
 use App\Services\WebSocketBroadcaster;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 
 class BookingController extends Controller
 {
@@ -44,8 +46,8 @@ class BookingController extends Controller
                 'status' => 'error',
                 'message' => 'Valid non-zero GPS coordinates are required.',
                 'errors' => [
-                    'pickup_lat' => ['Pickup coordinates cannot be 0, 0.'],
-                    'pickup_lng' => ['Pickup coordinates cannot be 0, 0.'],
+                    'pickup_lat' => ['The pickup latitude must be non-zero.'],
+                    'pickup_lng' => ['The pickup longitude must be non-zero.'],
                 ],
             ], 422);
         }
@@ -144,8 +146,30 @@ class BookingController extends Controller
         $initialMeters = round($initialKm * 1000.0, 1);
         $initialEta = PhoneHelper::estimateEtaMinutes($initialKm);
 
+        $bearerToken = $request->bearerToken();
+        $userId = null;
+        if ($bearerToken) {
+            $cachedId = Cache::get('token_user_' . $bearerToken);
+            if ($cachedId) {
+                $userId = $cachedId;
+            }
+        }
+        if (!$userId && $request->user() instanceof User) {
+            $userId = $request->user()->id;
+        }
+        if (!$userId && !empty($patientPhone)) {
+            $norm = PhoneHelper::normalizePhone10($patientPhone);
+            if ($norm) {
+                $matchedUser = User::where('phone_key', $norm)->orWhere('phone', 'like', "%{$norm}%")->first();
+                if ($matchedUser) {
+                    $userId = $matchedUser->id;
+                }
+            }
+        }
+
         $booking = Booking::create([
             'id' => $numericId,
+            'user_id' => $userId,
             'booking_reference' => $bookingId,
             'reference_number' => $referenceNumber,
             'status' => 'finding_ambulance',
@@ -241,26 +265,37 @@ class BookingController extends Controller
             ], 404);
         }
 
-        // Ownership authorization check: authenticated user via token or X-User-Phone
-        $user = $request->user();
-        if (!$user) {
-            $token = $request->bearerToken();
-            if ($token) {
-                $user = \App\Models\User::where('remember_token', $token)->first();
-            }
+        // Ownership authorization check: If token user exists, verify they own the booking
+        $bearerToken = $request->bearerToken();
+        $authUserId = null;
+        if ($bearerToken) {
+            $authUserId = Cache::get('token_user_' . $bearerToken);
+        }
+        if (!$authUserId && $request->user()) {
+            $authUserId = $request->user()->id;
         }
 
-        if ($user && !empty($booking->callback_phone)) {
-            $userNorm = PhoneHelper::normalizePhone10($user->phone);
-            $bookingNorm = PhoneHelper::normalizePhone10($booking->callback_phone);
-            if ($userNorm && $bookingNorm && $userNorm !== $bookingNorm) {
+        if ($authUserId) {
+            $authUser = User::find($authUserId);
+            if ($booking->user_id && (int) $booking->user_id !== (int) $authUserId) {
                 return response()->json([
                     'status' => 'error',
                     'message' => 'Unauthorized: You are only permitted to cancel your own emergency booking.',
                 ], 403);
             }
+            if ($authUser) {
+                $userPhoneNorm = PhoneHelper::normalizePhone10((string) $authUser->phone);
+                $bookingPhoneNorm = PhoneHelper::normalizePhone10((string) $booking->callback_phone);
+                if ($userPhoneNorm && $bookingPhoneNorm && $userPhoneNorm !== $bookingPhoneNorm) {
+                    return response()->json([
+                        'status' => 'error',
+                        'message' => 'Unauthorized: You are only permitted to cancel your own emergency booking.',
+                    ], 403);
+                }
+            }
         }
 
+        // Ownership authorization check: If requester provides caller phone, ensure it matches
         $callerPhone = trim((string) ($request->input('phone') ?? $request->header('X-User-Phone') ?? ''));
         if (!empty($callerPhone) && !empty($booking->callback_phone)) {
             $callerNorm = PhoneHelper::normalizePhone10($callerPhone);
