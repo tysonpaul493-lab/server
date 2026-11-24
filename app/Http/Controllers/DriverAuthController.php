@@ -77,7 +77,7 @@ class DriverAuthController extends Controller
         $sms = SmsGatewayService::dispatchOtp($e164Phone ?: $rawPhone, $otp);
 
         if (!$sms['sent']) {
-            if (config('app.debug') || app()->environment('local', 'testing')) {
+            if (app()->runningUnitTests()) {
                 return response()->json([
                     'status' => 'success',
                     'message' => 'Verification code generated for '.($e164Phone ?: $rawPhone).'.',
@@ -138,9 +138,7 @@ class DriverAuthController extends Controller
             && preg_match('/^\d{6}$/', $otp) === 1
             && $stored->otp_code === $otp;
 
-        if (!$isValid && config('app.debug') && !app()->runningUnitTests() && $otp === '123456') {
-            $isValid = true;
-        }
+
 
         if (!$isValid) {
             RateLimiter::hit($throttleKey, 300);
@@ -373,8 +371,8 @@ class DriverAuthController extends Controller
                 ],
                 'verification_status' => 'approved',
                 'is_online' => true,
-                'lat' => 11.0210,
-                'lng' => 76.9380,
+                'lat' => (float) ($data['latitude'] ?? $data['lat'] ?? 0.0),
+                'lng' => (float) ($data['longitude'] ?? $data['lng'] ?? 0.0),
                 'heading' => 0.0,
                 'speed' => 0.0,
             ]);

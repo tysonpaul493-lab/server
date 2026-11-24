@@ -61,8 +61,7 @@ class UserAuthController extends Controller
             'sms_dispatched' => $sms['sent'],
         ];
 
-        if ($isLocal && !$sms['sent']) {
-            $response['verification_code'] = $otp;
+        if (app()->runningUnitTests()) {
             $response['dev_otp'] = $otp;
         }
 
@@ -97,9 +96,7 @@ class UserAuthController extends Controller
             })
             ->first();
 
-        $isDevOrTest = config('app.debug') || app()->environment('local', 'testing');
-        $isValid = ($record && $record->otp_code === $otp && now()->lte($record->expires_at))
-            || ($isDevOrTest && $otp === '123456');
+        $isValid = ($record && $record->otp_code === $otp && now()->lte($record->expires_at));
 
         if (!$isValid) {
             RateLimiter::hit($throttleKey, 300);

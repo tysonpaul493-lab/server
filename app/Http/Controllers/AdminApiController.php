@@ -282,33 +282,21 @@ class AdminApiController extends Controller
 
     public function addAmbulance(Request $request): JsonResponse
     {
-        $regNumber = strtoupper(trim((string) $request->input('registration_number', 'TN 38 EMG 1081')));
-        $vehicleType = strtoupper(trim((string) $request->input('vehicle_type', 'ALS')));
-        $operator = (string) $request->input('operator_name', 'State Emergency Medical Services');
-
-        $existing = Driver::where('vehicle_plate', $regNumber)->orWhere('vehicle_number', $regNumber)->first();
-        if (!$existing) {
-            $driver = Driver::create([
-                'name' => 'Paramedic Crew (' . $regNumber . ')',
-                'phone' => '+91 ' . rand(7000000000, 9999999999),
-                'email' => 'crew_' . strtolower(preg_replace('/[^a-zA-Z0-9]/', '', $regNumber)) . '@paramedic.org',
-                'vehicle_plate' => $regNumber,
-                'vehicle_number' => $regNumber,
-                'vehicle_type' => $vehicleType,
-                'operator_affiliation' => $operator,
-                'verification_status' => 'APPROVED',
-                'is_online' => true,
-                'lat' => (float) $request->input('latitude', 11.0168),
-                'lng' => (float) $request->input('longitude', 76.9558),
-                'speed' => 0.0,
-                'heading' => 0.0,
-                'total_trips' => 0,
-                'rating' => 5.0,
-            ]);
-            $driverId = (int) $driver->id;
-        } else {
-            $driverId = (int) $existing->id;
+        $regNumber = strtoupper(trim((string) $request->input('registration_number', '')));
+        if ($regNumber === '') {
+            return response()->json(['success' => false, 'message' => 'Ambulance registration number is required.'], 422);
         }
+        $vehicleType = strtoupper(trim((string) $request->input('vehicle_type', 'ALS')));
+        $operator = (string) $request->input('operator_name', 'Emergency Medical Services');
+
+        $driver = null;
+        if ($request->has('driver_id') && is_numeric($request->input('driver_id'))) {
+            $driver = Driver::find((int) $request->input('driver_id'));
+        }
+        if (!$driver) {
+            $driver = Driver::where('vehicle_plate', $regNumber)->orWhere('vehicle_number', $regNumber)->first();
+        }
+        $driverId = $driver ? (int) $driver->id : null;
 
         try {
             $ambulance = Ambulance::firstOrCreate(
@@ -322,8 +310,8 @@ class AdminApiController extends Controller
                     'assigned_driver_id' => $driverId,
                     'hospital_affiliation' => $operator,
                     'equipment_list' => (array) $request->input('equipment_capabilities', ['Oxygen', 'Defibrillator', 'Ventilator']),
-                    'lat' => (float) $request->input('latitude', 11.0168),
-                    'lng' => (float) $request->input('longitude', 76.9558),
+                    'lat' => $request->has('latitude') ? (float) $request->input('latitude') : null,
+                    'lng' => $request->has('longitude') ? (float) $request->input('longitude') : null,
                     'speed' => 0.0,
                     'heading' => 0.0,
                 ]
@@ -704,27 +692,23 @@ class AdminApiController extends Controller
      */
     public function hospitals(): JsonResponse
     {
-        $raw = (new HospitalController())->nearby(new Request(['lat' => 11.0318, 'lng' => 76.9437]));
-        $res = $raw->getData(true);
-        $list = $res['data'] ?? $res['hospitals'] ?? [];
-
-        $hospitals = array_map(function ($h, $idx) {
+        $hospitals = Hospital::all()->map(function (Hospital $h) {
             return [
-                'id' => $idx + 1,
-                'name' => $h['name'],
-                'category' => 'Government & Tertiary Trauma Hospital',
-                'address' => $h['address'],
-                'latitude' => (float) $h['lat'],
-                'longitude' => (float) $h['lng'],
-                'phone' => $h['emergency_phone'] ?? '108',
-                'emergency_contact' => $h['emergency_phone'] ?? '108',
-                'verified_services' => $h['emergency_services'] ?? ['24x7 Casualty', 'Level 1 Trauma Care', 'Emergency ICU'],
-                'specialties' => ['Cardiac Cath Lab', 'Neurotrauma', 'Emergency ICU', 'Dialysis Bay'],
-                'verification_status' => 'VERIFIED',
+                'id' => (int) $h->id,
+                'name' => $h->name,
+                'category' => $h->trauma_level ?: 'Government & Tertiary Trauma Hospital',
+                'address' => $h->address,
+                'latitude' => $h->lat !== null ? (float) $h->lat : null,
+                'longitude' => $h->lng !== null ? (float) $h->lng : null,
+                'phone' => $h->emergency_phone ?: '108',
+                'emergency_contact' => $h->emergency_phone ?: '108',
+                'verified_services' => $h->emergency_services ?: ['24x7 Casualty', 'Level 1 Trauma Care', 'Emergency ICU'],
+                'specialties' => is_array($h->emergency_services) ? $h->emergency_services : ['Emergency ICU', 'Trauma Care'],
+                'verification_status' => $h->verified ? 'VERIFIED' : 'PENDING',
                 'service_zone' => 'Coimbatore Metro & Urban Zone',
                 'has_live_integration' => true,
             ];
-        }, $list, array_keys($list));
+        })->values()->all();
 
         return response()->json([
             'success' => true,
@@ -734,13 +718,18 @@ class AdminApiController extends Controller
 
     public function addHospital(Request $request): JsonResponse
     {
-        $name = (string) $request->input('name', 'Hospital Center');
-        $slug = 'hosp-' . strtolower(preg_replace('/[^a-zA-Z0-9]/', '-', $name)) . '-' . rand(100, 999);
+        $request->validate([
+            'name' => 'required|string|min:2',
+            'address' => 'required|string|min:3',
+        ]);
+
+        $name = (string) $request->input('name');
+        $slug = 'hosp-' . strtolower(preg_replace('/[^a-zA-Z0-9]/', '-', $name)) . '-' . time();
         $category = (string) $request->input('category', 'Apex Level 1 Trauma Center');
-        $address = (string) $request->input('address', 'Coimbatore');
-        $lat = (float) $request->input('latitude', 11.0168);
-        $lng = (float) $request->input('longitude', 76.9558);
-        $phone = (string) $request->input('phone', '0422-2485000');
+        $address = (string) $request->input('address');
+        $lat = $request->input('latitude') !== null ? (float) $request->input('latitude') : null;
+        $lng = $request->input('longitude') !== null ? (float) $request->input('longitude') : null;
+        $phone = (string) $request->input('phone', '108');
         $emergencyContact = (string) $request->input('emergency_contact', $phone);
         $services = (array) $request->input('verified_services', ['24x7 Casualty', 'Level 1 Trauma Care', 'Emergency ICU']);
 
@@ -771,8 +760,8 @@ class AdminApiController extends Controller
             'name' => $hospital->name,
             'category' => $hospital->trauma_level,
             'address' => $hospital->address,
-            'latitude' => (float) $hospital->lat,
-            'longitude' => (float) $hospital->lng,
+            'latitude' => $hospital->lat !== null ? (float) $hospital->lat : null,
+            'longitude' => $hospital->lng !== null ? (float) $hospital->lng : null,
             'phone' => $hospital->emergency_phone,
             'emergency_contact' => $hospital->emergency_phone,
             'verified_services' => $hospital->emergency_services,
@@ -1041,8 +1030,8 @@ class AdminApiController extends Controller
                 ->orderByDesc('accepted_at')
                 ->first();
 
-            $lat = (float) ($d->lat ?: 11.0318);
-            $lng = (float) ($d->lng ?: 76.9437);
+            $lat = $d->lat !== null ? (float) $d->lat : null;
+            $lng = $d->lng !== null ? (float) $d->lng : null;
             $speed = (float) ($d->speed ?: 0.0);
             $heading = (float) ($d->heading ?: 0.0);
 
@@ -1057,7 +1046,7 @@ class AdminApiController extends Controller
 
             return [
                 'id' => (int) $d->id,
-                'registration_number' => $d->vehicle_plate ?: ($d->vehicle_number ?: 'TN 38 CB 1234'),
+                'registration_number' => $d->vehicle_plate ?: ($d->vehicle_number ?: ''),
                 'vehicle_type' => strtoupper((string) ($d->vehicle_type ?: 'ALS')),
                 'operator_name' => $d->operator_affiliation ?: 'Government 108 Emergency Fleet',
                 'primary_driver_id' => (int) $d->id,
@@ -1087,7 +1076,7 @@ class AdminApiController extends Controller
                     'name' => $d->name,
                     'phone' => $d->phone,
                     'online_status' => $d->is_online ? 'ONLINE' : 'OFFLINE',
-                    'rating' => (float) ($d->rating ?: 5.0),
+                    'rating' => (float) ($d->rating ?: 0.0),
                 ],
                 'active_trip' => $activeBooking ? [
                     'booking_id' => (int) $activeBooking->id,
@@ -1138,7 +1127,7 @@ class AdminApiController extends Controller
             'requester_name' => $b->patient_name ?: 'Emergency Caller (SIM Verified)',
             'requester_phone' => $b->callback_phone ?: '',
             'patient_name' => $b->patient_name ?: 'Emergency Patient',
-            'patient_age' => 42,
+            'patient_age' => null,
             'patient_gender' => 'Emergency Patient',
             'severity' => strtoupper((string) ($b->emergency_category ?: 'CRITICAL')),
             'chief_complaint' => $b->notes ?: ($b->essential_instructions ?: 'Urgent 108 medical response required'),
@@ -1168,19 +1157,19 @@ class AdminApiController extends Controller
                 'verification_status' => 'APPROVED',
                 'online_status' => $driver->is_online ? 'ONLINE' : 'OFFLINE',
                 'operational_status' => 'ON_TRIP',
-                'completed_trips_count' => (int) ($driver->total_trips ?: 5),
-                'average_rating' => (float) ($driver->rating ?: 5.0),
-                'current_latitude' => (float) ($driver->lat ?: 11.0318),
-                'current_longitude' => (float) ($driver->lng ?: 76.9437),
+                'completed_trips_count' => (int) ($driver->total_trips ?: 0),
+                'average_rating' => (float) ($driver->rating ?: 0.0),
+                'current_latitude' => $driver->lat !== null ? (float) $driver->lat : null,
+                'current_longitude' => $driver->lng !== null ? (float) $driver->lng : null,
             ] : null,
             'ambulance_id' => $driver ? (int) $driver->id : null,
             'ambulance' => $driver ? [
                 'id' => (int) $driver->id,
-                'registration_number' => $driver->vehicle_plate ?: ($driver->vehicle_number ?: 'TN 38 CB 1234'),
+                'registration_number' => $driver->vehicle_plate ?: ($driver->vehicle_number ?: ''),
                 'vehicle_type' => strtoupper((string) ($driver->vehicle_type ?: 'ALS')),
                 'operational_status' => 'BUSY',
-                'latitude' => (float) ($driver->lat ?: 11.0318),
-                'longitude' => (float) ($driver->lng ?: 76.9437),
+                'latitude' => $driver->lat !== null ? (float) $driver->lat : null,
+                'longitude' => $driver->lng !== null ? (float) $driver->lng : null,
                 'speed_kmh' => (float) ($driver->speed ?: 0.0),
                 'heading' => (float) ($driver->heading ?: 0.0),
             ] : null,

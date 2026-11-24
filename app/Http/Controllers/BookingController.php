@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Booking;
 use App\Models\Driver;
 use App\Models\DriverNotification;
+use App\Models\Hospital;
 use App\Models\User;
 use App\Services\PhoneHelper;
 use App\Services\WebSocketBroadcaster;
@@ -78,22 +79,22 @@ class BookingController extends Controller
         $hospitalDistanceKm = PhoneHelper::calculateDrivingDistanceKm($pickupLat, $pickupLng, $destLat, $destLng);
         $hospitalEtaMin = PhoneHelper::estimateEtaMinutes($hospitalDistanceKm);
 
-        $hospitalObj = $isDestObj ? [
-            'id' => $destInput['id'] ?? 'hosp-selected',
+        $hospId = $isDestObj ? ($destInput['id'] ?? null) : null;
+        if (!$hospId && !empty($destHospitalName)) {
+            $matchedHosp = Hospital::where('name', 'like', "%{$destHospitalName}%")->first();
+            if ($matchedHosp) {
+                $hospId = (string) ($matchedHosp->slug ?: $matchedHosp->id);
+            }
+        }
+
+        $hospitalObj = [
+            'id' => $hospId,
             'name' => $destHospitalName,
             'address' => $destAddress,
             'lat' => $destLat,
             'lng' => $destLng,
-            'distance_km' => round($hospitalDistanceKm, 1),
-            'estimated_drive_time' => $hospitalEtaMin.' min',
-        ] : [
-            'id' => 'hosp-default',
-            'name' => $destHospitalName,
-            'address' => $destAddress,
-            'lat' => $destLat,
-            'lng' => $destLng,
-            'distance_km' => round($hospitalDistanceKm, 1),
-            'estimated_drive_time' => $hospitalEtaMin.' min',
+            'distance_km' => $hospitalDistanceKm > 0 ? round($hospitalDistanceKm, 1) : null,
+            'estimated_drive_time' => $hospitalDistanceKm > 0 ? $hospitalEtaMin.' min' : null,
         ];
 
         // Exclude drivers who currently have an ongoing emergency trip
