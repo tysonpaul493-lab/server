@@ -6,9 +6,9 @@ use App\Models\OtpCode;
 use App\Models\User;
 use App\Services\PhoneHelper;
 use App\Services\SmsGatewayService;
+use App\Services\UserAuthResolver;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\RateLimiter;
 
@@ -122,14 +122,20 @@ class UserAuthController extends Controller
             }
         }
 
-        $token = 'sanctum_user_' . bin2hex(random_bytes(32));
-        Cache::put('token_user_' . $token, $user->id, now()->addDays(30));
+        $token = UserAuthResolver::issueToken($user);
 
         return response()->json([
             'status' => 'success',
             'token' => $token,
             'user' => $user->toApiArray(),
         ]);
+    }
+
+    public function logout(Request $request): JsonResponse
+    {
+        UserAuthResolver::revokeToken(UserAuthResolver::extractBearerToken($request));
+
+        return response()->json(['status' => 'success', 'message' => 'Signed out successfully.']);
     }
 
     public function lookupUser(Request $request): JsonResponse
@@ -157,61 +163,51 @@ class UserAuthController extends Controller
 
     public function getProfile(Request $request): JsonResponse
     {
-        $rawPhone = trim((string) ($request->input('phone') ?? $request->query('phone') ?? ''));
-        $user = User::findByPhone($rawPhone);
-        if ($user) {
-            return response()->json([
-                'status' => 'success',
-                'user' => $user->toApiArray(),
-            ]);
-        }
-
-        return response()->json([
-            'status' => 'error',
-            'message' => 'User not found.',
-        ], 404);
-    }
-
-    public function updateProfile(Request $request): JsonResponse
-    {
-        $data = $request->all();
-        $rawPhone = trim((string) ($data['phone'] ?? ''));
-        if ($rawPhone === '') {
-            return response()->json(['status' => 'error', 'message' => 'Phone number is required.'], 400);
-        }
-
-        $user = User::findByPhone($rawPhone);
-        $inputName = trim((string) ($data['name'] ?? ''));
-        $cleanPhone = '+91 ' . (PhoneHelper::normalizePhone10($rawPhone) ?: $rawPhone);
-
+        $user = UserAuthResolver::resolveUser($request);
         if (!$user) {
-            $user = User::create([
-                'public_id' => 'usr-'.((int) (microtime(true) * 1000)),
-                'name' => $inputName,
-                'phone' => $cleanPhone,
-                'blood_group' => trim((string) ($data['blood_group'] ?? 'O+')),
-                'emergency_notes' => trim((string) ($data['emergency_notes'] ?? '')),
-            ]);
-        } else {
-            $updates = [];
-            // ONLY update name if a non-empty name was provided! NEVER overwrite an existing name with empty string!
-            if ($inputName !== '') {
-                $updates['name'] = $inputName;
-            }
-            if (!empty($data['blood_group'])) {
-                $updates['blood_group'] = trim((string) $data['blood_group']);
-            }
-            if (isset($data['emergency_notes']) && $data['emergency_notes'] !== '') {
-                $updates['emergency_notes'] = trim((string) $data['emergency_notes']);
-            }
-            if (!empty($updates)) {
-                $user->update($updates);
-            }
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Unauthorized: Valid user session required.',
+            ], 401);
         }
 
         return response()->json([
             'status' => 'success',
             'user' => $user->toApiArray(),
+        ]);
+    }
+
+    public function updateProfile(Request $request): JsonResponse
+    {
+        $user = UserAuthResolver::resolveUser($request);
+        if (!$user) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Unauthorized: Valid user session required.',
+            ], 401);
+        }
+
+        $data = $request->all();
+        $inputName = trim((string) ($data['name'] ?? ''));
+
+        $updates = [];
+        // ONLY update name if a non-empty name was provided! NEVER overwrite an existing name with empty string!
+        if ($inputName !== '') {
+            $updates['name'] = $inputName;
+        }
+        if (array_key_exists('blood_group', $data) && trim((string) $data['blood_group']) !== '') {
+            $updates['blood_group'] = trim((string) $data['blood_group']);
+        }
+        if (array_key_exists('emergency_notes', $data) && trim((string) $data['emergency_notes']) !== '') {
+            $updates['emergency_notes'] = trim((string) $data['emergency_notes']);
+        }
+        if (!empty($updates)) {
+            $user->update($updates);
+        }
+
+        return response()->json([
+            'status' => 'success',
+            'user' => $user->fresh()->toApiArray(),
         ]);
     }
 
@@ -290,22 +286,62 @@ class UserAuthController extends Controller
             ], 400);
         }
 
-        // SIM card mismatch protection: If device hardware SIM number is provided, verify match
-        $deviceSimNumber = trim((string) ($request->input('sim_number') ?? ''));
-        if ($deviceSimNumber !== '') {
-            $simDigits = preg_replace('/\D/', '', $deviceSimNumber);
-            if (strlen($simDigits) >= 10) {
-                $simLast10 = substr($simDigits, -10);
-                if ($simLast10 !== $digits) {
-                    return response()->json([
-                        'status' => 'error',
-                        'message' => "Security Alert: SIM card mismatch. The entered mobile number (+91 {$digits}) does not match the SIM card (+91 {$simLast10}) inserted in this mobile phone. You can only use the physical SIM active in this device.",
-                    ], 403);
-                }
+        // Rate limiting against automated SIM login brute force
+        $throttleKey = 'user-login:' . $request->ip() . ':' . $digits;
+        if (RateLimiter::tooManyAttempts($throttleKey, 10)) {
+            $seconds = RateLimiter::availableIn($throttleKey);
+            return response()->json([
+                'status' => 'error',
+                'message' => "Security lockout: Too many login attempts. Retry in {$seconds}s.",
+            ], 429);
+        }
+        RateLimiter::hit($throttleKey, 300);
+
+        // Mobile hardware SIM attestation enforcement
+        $platform = strtolower(trim((string) ($request->input('platform') ?? '')));
+        if (in_array($platform, ['android', 'ios'], true)) {
+            if ($request->has('has_permission') && !$request->boolean('has_permission')) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Phone/SIM permission is required to verify the SIM card inserted in this mobile device.',
+                ], 403);
+            }
+            if ($request->has('has_sim') && !$request->boolean('has_sim')) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Security Alert: No active SIM card detected in this mobile phone.',
+                ], 403);
             }
         }
 
+        // SIM card mismatch protection across primary sim_number and multi-SIM sim_numbers[]
+        $deviceSimNumber = trim((string) ($request->input('sim_number') ?? ''));
+        $rawSimNumbers = is_array($request->input('sim_numbers')) ? $request->input('sim_numbers') : [];
+        if ($deviceSimNumber !== '') {
+            $rawSimNumbers[] = $deviceSimNumber;
+        }
+        $normalizedSims = [];
+        foreach ($rawSimNumbers as $sn) {
+            $sd = preg_replace('/\D/', '', (string) $sn);
+            if (strlen($sd) >= 10) {
+                $normalizedSims[] = substr($sd, -10);
+            }
+        }
+        if (!empty($normalizedSims) && !in_array($digits, $normalizedSims, true)) {
+            $detected = '+91 ' . $normalizedSims[0];
+            return response()->json([
+                'status' => 'error',
+                'message' => "Security Alert: SIM card mismatch. The entered mobile number (+91 {$digits}) does not match the SIM card ({$detected}) inserted in this mobile phone. Only the physical SIM active in this device is allowed.",
+            ], 403);
+        }
+
         $user = User::findByPhone($digits);
+        if ($user && strtoupper((string) ($user->status ?? 'ACTIVE')) === 'SUSPENDED') {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'This user account has been suspended by emergency command.',
+            ], 403);
+        }
 
         if (!$user) {
             $userName = $inputName !== '' ? $inputName : '';
@@ -322,8 +358,7 @@ class UserAuthController extends Controller
             }
         }
 
-        $token = 'sanctum_user_' . bin2hex(random_bytes(32));
-        Cache::put('token_user_' . $token, $user->id, now()->addDays(30));
+        $token = UserAuthResolver::issueToken($user);
 
         return response()->json([
             'status' => 'success',
@@ -380,8 +415,7 @@ class UserAuthController extends Controller
             ]);
         }
 
-        $token = 'sanctum_user_' . bin2hex(random_bytes(32));
-        Cache::put('token_user_' . $token, $user->id, now()->addDays(30));
+        $token = UserAuthResolver::issueToken($user);
 
         return response()->json([
             'status' => 'success',

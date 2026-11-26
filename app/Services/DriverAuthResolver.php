@@ -41,10 +41,12 @@ class DriverAuthResolver
 
         $token = self::extractBearerToken($request);
         if ($token !== '') {
-            $record = DriverToken::where('token', $token)->first();
+            $record = DriverToken::where('token', $token)
+                ->where('created_at', '>=', now()->subDays(30))
+                ->first();
             if ($record) {
                 $driver = Driver::find($record->driver_id);
-                if ($driver) {
+                if ($driver && strtolower((string) ($driver->verification_status ?? '')) !== 'suspended') {
                     return $driver;
                 }
             }

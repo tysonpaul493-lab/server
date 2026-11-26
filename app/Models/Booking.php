@@ -13,6 +13,7 @@ class Booking extends Model
 
     protected $fillable = [
         'id',
+        'user_id',
         'booking_reference',
         'reference_number',
         'driver_id',
@@ -47,6 +48,7 @@ class Booking extends Model
     {
         return [
             'id' => 'integer',
+            'user_id' => 'integer',
             'driver_id' => 'integer',
             'pickup_lat' => 'float',
             'pickup_lng' => 'float',

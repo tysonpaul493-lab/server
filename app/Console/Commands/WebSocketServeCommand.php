@@ -23,7 +23,7 @@ class WebSocketServeCommand extends Command
     protected $signature = 'websocket:serve {--host=0.0.0.0} {--port=8080} {--internal-port=8081}';
     protected $description = 'Run the LifeRoute Pusher/Reverb-compatible PHP WebSocket server';
 
-    /** @var array<int, array{conn: ConnectionInterface, channels: array<string, bool>, upgraded: bool, buffer: string, wsBuffer: ?MessageBuffer}> */
+    /** @var array<int, array{conn: ConnectionInterface, channels: array<string, bool>, upgraded: bool, buffer: string, wsBuffer: ?MessageBuffer, socket_id: string}> */
     private array $clients = [];
 
     public function handle(): int
@@ -39,12 +39,14 @@ class WebSocketServeCommand extends Command
         $wsSocket = new SocketServer("{$host}:{$port}", [], $loop);
         $wsSocket->on('connection', function (ConnectionInterface $conn) use ($negotiator, $closeChecker) {
             $id = spl_object_id($conn);
+            $socketId = ((int) (microtime(true) * 1000)).'.'.random_int(1000, 9999);
             $this->clients[$id] = [
                 'conn' => $conn,
                 'channels' => [],
                 'upgraded' => false,
                 'buffer' => '',
                 'wsBuffer' => null,
+                'socket_id' => $socketId,
             ];
 
             $conn->on('data', function (string $chunk) use ($id, $conn, $negotiator, $closeChecker) {
@@ -106,7 +108,7 @@ class WebSocketServeCommand extends Command
                 $this->sendToClient($id, [
                     'event' => 'pusher:connection_established',
                     'data' => json_encode([
-                        'socket_id' => ((int) (microtime(true) * 1000)).'.'.random_int(1000, 9999),
+                        'socket_id' => $this->clients[$id]['socket_id'],
                         'activity_timeout' => 120,
                     ]),
                 ]);
@@ -171,6 +173,29 @@ class WebSocketServeCommand extends Command
         if ($event === 'pusher:subscribe' || $event === 'subscribe') {
             $channel = $data['data']['channel'] ?? ($data['channel'] ?? null);
             if (is_string($channel) && $channel !== '' && isset($this->clients[$clientId])) {
+                $isPrivate = str_starts_with($channel, 'private-') || str_starts_with($channel, 'presence-');
+                if ($isPrivate) {
+                    $providedAuth = (string) ($data['data']['auth'] ?? ($data['auth'] ?? ''));
+                    $channelData = $data['data']['channel_data'] ?? ($data['channel_data'] ?? null);
+                    $socketId = $this->clients[$clientId]['socket_id'] ?? '';
+                    $appKey = (string) config('liferoute.reverb_app_key', 'liferoute_reverb_key');
+                    $appSecret = (string) config('liferoute.reverb_app_secret', 'liferoute_emergency_ws_secret_2026');
+                    $stringToSign = $socketId.':'.$channel.(is_string($channelData) && $channelData !== '' ? ':'.$channelData : '');
+                    $expectedAuth = $appKey.':'.hash_hmac('sha256', $stringToSign, $appSecret);
+
+                    if ($providedAuth === '' || !hash_equals($expectedAuth, $providedAuth)) {
+                        $this->sendToClient($clientId, [
+                            'event' => 'pusher:error',
+                            'channel' => $channel,
+                            'data' => json_encode([
+                                'code' => 4009,
+                                'message' => 'Unauthorized private channel subscription.',
+                            ]),
+                        ]);
+                        return;
+                    }
+                }
+
                 $this->clients[$clientId]['channels'][$channel] = true;
                 $this->line("Client subscribed to channel: {$channel}");
                 $this->sendToClient($clientId, [

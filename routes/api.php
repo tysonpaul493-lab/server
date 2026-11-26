@@ -8,6 +8,8 @@ use App\Http\Controllers\DriverOperationsController;
 use App\Http\Controllers\HealthController;
 use App\Http\Controllers\HospitalController;
 use App\Http\Controllers\UserAuthController;
+use App\Http\Middleware\RequireAdminAuth;
+use App\Http\Middleware\RequireUserAuth;
 use Illuminate\Support\Facades\Route;
 
 // Health & Service Info
@@ -21,11 +23,13 @@ Route::get('/api/v1/health', [HealthController::class, 'health']);
 
 // Broadcasting Auth
 Route::post('/broadcasting/auth', [HealthController::class, 'broadcastingAuth']);
+Route::post('/api/broadcasting/auth', [HealthController::class, 'broadcastingAuth']);
 Route::post('/api/v1/broadcasting/auth', [HealthController::class, 'broadcastingAuth']);
 
 // User App & Shared Routes (/api/*, /api/v1/*, and root /*)
 foreach (['/api', '/api/v1', ''] as $prefix) {
-    Route::prefix($prefix)->group(function () {
+    Route::prefix($prefix)->middleware(['throttle:120,1'])->group(function () {
+        // Public User Auth & Nearby Hospitals
         Route::post('/auth/otp/send', [UserAuthController::class, 'sendOtp']);
         Route::post('/auth/otp/verify', [UserAuthController::class, 'verifyOtp']);
         Route::post('/user/auth/login', [UserAuthController::class, 'login']);
@@ -34,54 +38,62 @@ foreach (['/api', '/api/v1', ''] as $prefix) {
         Route::post('/auth/user-register', [UserAuthController::class, 'register']);
         Route::match(['GET', 'POST'], '/auth/lookup-user', [UserAuthController::class, 'lookupUser']);
         Route::match(['GET', 'POST'], '/user/verify-sim', [UserAuthController::class, 'verifySimCarrier']);
-        Route::get('/user/profile', [UserAuthController::class, 'getProfile']);
-        Route::put('/user/profile', [UserAuthController::class, 'updateProfile']);
-
-        // Cloud Database & Backup API
-        Route::get('/database/status', [\App\Http\Controllers\CloudDatabaseController::class, 'status']);
-        Route::get('/database/export', [\App\Http\Controllers\CloudDatabaseController::class, 'export']);
-        Route::post('/database/snapshot', [\App\Http\Controllers\CloudDatabaseController::class, 'triggerSnapshot']);
-
         Route::get('/hospitals/nearby', [HospitalController::class, 'nearby']);
 
-        Route::post('/bookings', [BookingController::class, 'store']);
-        Route::get('/bookings/history', [BookingController::class, 'history']);
-        Route::get('/bookings/{id}', [BookingController::class, 'show']);
-        Route::post('/bookings/{id}/cancel', [BookingController::class, 'cancel']);
+        // Authenticated User Routes
+        Route::middleware([RequireUserAuth::class])->group(function () {
+            Route::post('/user/auth/logout', [UserAuthController::class, 'logout']);
+            Route::get('/user/profile', [UserAuthController::class, 'getProfile']);
+            Route::put('/user/profile', [UserAuthController::class, 'updateProfile']);
 
+            Route::post('/bookings', [BookingController::class, 'store']);
+            Route::get('/bookings/history', [BookingController::class, 'history']);
+            Route::post('/bookings/{id}/cancel', [BookingController::class, 'cancel']);
+        });
+
+        // Participant-Authorized Booking & Chat Routes (User owner, Assigned Driver, or Admin)
+        Route::get('/bookings/{id}', [BookingController::class, 'show']);
         Route::get('/bookings/{id}/chat', [ChatController::class, 'index']);
         Route::post('/bookings/{id}/chat', [ChatController::class, 'store']);
 
-        // Admin Command Center Routes
+        // Admin Login
         Route::post('/auth/login', [AdminApiController::class, 'login']);
         Route::post('/auth/logout', [AdminApiController::class, 'logout']);
-        Route::get('/dashboard/stats', [AdminApiController::class, 'dashboardStats']);
-        Route::get('/tracking/live', [AdminApiController::class, 'liveTracking']);
-        Route::get('/ambulances', [AdminApiController::class, 'ambulances']);
-        Route::post('/ambulances', [AdminApiController::class, 'addAmbulance']);
-        Route::post('/ambulances/{id}/status', [AdminApiController::class, 'updateAmbulanceStatus']);
-        Route::get('/drivers', [AdminApiController::class, 'drivers']);
-        Route::post('/drivers/{id}/verify', [AdminApiController::class, 'verifyDriver']);
-        Route::post('/drivers/{id}/toggle-suspension', [AdminApiController::class, 'toggleSuspension']);
-        Route::get('/bookings', [AdminApiController::class, 'bookings']);
-        Route::post('/bookings/{id}/assign-driver', [AdminApiController::class, 'assignDriver']);
-        Route::post('/bookings/{id}/cancel-admin', [AdminApiController::class, 'cancelBooking']);
-        Route::post('/bookings/{id}/notes', [AdminApiController::class, 'addBookingNote']);
-        Route::get('/hospitals', [AdminApiController::class, 'hospitals']);
-        Route::post('/hospitals', [AdminApiController::class, 'addHospital']);
-        Route::get('/users', [AdminApiController::class, 'users']);
-        Route::post('/users/{id}/toggle-status', [AdminApiController::class, 'toggleUserStatus']);
-        Route::get('/alerts', [AdminApiController::class, 'alerts']);
-        Route::post('/alerts/broadcast', [AdminApiController::class, 'broadcastAlert']);
-        Route::post('/alerts/{id}/acknowledge', [AdminApiController::class, 'acknowledgeAlert']);
-        Route::post('/alerts/{id}/resolve', [AdminApiController::class, 'resolveAlert']);
-        Route::get('/audit-logs', [AdminApiController::class, 'auditLogs']);
+
+        // Protected Admin Command Center & Database Snapshot Routes
+        Route::middleware([RequireAdminAuth::class])->group(function () {
+            Route::get('/database/status', [\App\Http\Controllers\CloudDatabaseController::class, 'status']);
+            Route::get('/database/export', [\App\Http\Controllers\CloudDatabaseController::class, 'export']);
+            Route::post('/database/snapshot', [\App\Http\Controllers\CloudDatabaseController::class, 'triggerSnapshot']);
+
+            Route::get('/dashboard/stats', [AdminApiController::class, 'dashboardStats']);
+            Route::get('/tracking/live', [AdminApiController::class, 'liveTracking']);
+            Route::get('/ambulances', [AdminApiController::class, 'ambulances']);
+            Route::post('/ambulances', [AdminApiController::class, 'addAmbulance']);
+            Route::post('/ambulances/{id}/status', [AdminApiController::class, 'updateAmbulanceStatus']);
+            Route::get('/drivers', [AdminApiController::class, 'drivers']);
+            Route::post('/drivers/{id}/verify', [AdminApiController::class, 'verifyDriver']);
+            Route::post('/drivers/{id}/toggle-suspension', [AdminApiController::class, 'toggleSuspension']);
+            Route::get('/bookings', [AdminApiController::class, 'bookings']);
+            Route::post('/bookings/{id}/assign-driver', [AdminApiController::class, 'assignDriver']);
+            Route::post('/bookings/{id}/cancel-admin', [AdminApiController::class, 'cancelBooking']);
+            Route::post('/bookings/{id}/notes', [AdminApiController::class, 'addBookingNote']);
+            Route::get('/hospitals', [AdminApiController::class, 'hospitals']);
+            Route::post('/hospitals', [AdminApiController::class, 'addHospital']);
+            Route::get('/users', [AdminApiController::class, 'users']);
+            Route::post('/users/{id}/toggle-status', [AdminApiController::class, 'toggleUserStatus']);
+            Route::get('/alerts', [AdminApiController::class, 'alerts']);
+            Route::post('/alerts/broadcast', [AdminApiController::class, 'broadcastAlert']);
+            Route::post('/alerts/{id}/acknowledge', [AdminApiController::class, 'acknowledgeAlert']);
+            Route::post('/alerts/{id}/resolve', [AdminApiController::class, 'resolveAlert']);
+            Route::get('/audit-logs', [AdminApiController::class, 'auditLogs']);
+        });
     });
 }
 
 // Driver App Routes (/api/v1/driver/* and /api/driver/*)
 foreach (['/api/v1/driver', '/api/driver'] as $driverPrefix) {
-    Route::prefix($driverPrefix)->group(function () {
+    Route::prefix($driverPrefix)->middleware(['throttle:120,1'])->group(function () {
         Route::post('/auth/check-phone', [DriverAuthController::class, 'checkPhone']);
         Route::get('/auth/sms-status', [DriverAuthController::class, 'smsStatus']);
         Route::post('/auth/send-otp', [DriverAuthController::class, 'sendOtp']);
@@ -111,7 +123,8 @@ foreach (['/api/v1/driver', '/api/driver'] as $driverPrefix) {
         Route::get('/trips/{id}', [DriverOperationsController::class, 'showTrip']);
         Route::patch('/trips/{id}/status', [DriverOperationsController::class, 'updateTripStatus']);
 
-        Route::post('/location/telemetry', [DriverOperationsController::class, 'telemetry']);
+        Route::post('/location/telemetry', [DriverOperationsController::class, 'telemetry'])
+            ->middleware(['throttle:300,1']);
 
         Route::get('/notifications', [DriverOperationsController::class, 'notifications']);
         Route::post('/notifications/{id}/read', [DriverOperationsController::class, 'markNotificationRead']);

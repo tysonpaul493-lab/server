@@ -15,6 +15,7 @@ use App\Services\PhoneHelper;
 use App\Services\WebSocketBroadcaster;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
@@ -26,12 +27,31 @@ class AdminApiController extends Controller
      */
     public static function resolveAdmin(Request $request): ?Admin
     {
+        $cachedAttr = $request->attributes->get('auth_admin');
+        if ($cachedAttr instanceof Admin) {
+            return $cachedAttr;
+        }
+
         $token = $request->bearerToken()
             ?: (string) ($request->header('X-Admin-Token') ?: $request->input('admin_token') ?: '');
         if (!$token) {
             return null;
         }
-        return Admin::where('api_token', $token)->first();
+
+        $cachedId = Cache::get('admin_token_' . hash('sha256', $token));
+        if ($cachedId) {
+            $admin = Admin::find($cachedId);
+            if ($admin) {
+                return $admin;
+            }
+        }
+
+        return Admin::where('api_token', $token)
+            ->where(function ($q) {
+                $q->whereNull('last_login_at')
+                    ->orWhere('last_login_at', '>=', now()->subDays(7));
+            })
+            ->first();
     }
 
     /**
@@ -70,8 +90,9 @@ class AdminApiController extends Controller
             }
         }
 
-        // 3. Cryptographically secure session token
+        // 3. Cryptographically secure session token (stored in cache for multi-session support + DB audit)
         $token = 'admin_' . bin2hex(random_bytes(32));
+        Cache::put('admin_token_' . hash('sha256', $token), $admin->id, now()->addDays(7));
         $admin->update([
             'api_token' => $token,
             'last_login_at' => now(),
@@ -97,8 +118,15 @@ class AdminApiController extends Controller
         ]);
     }
 
-    public function logout(): JsonResponse
+    public function logout(Request $request): JsonResponse
     {
+        $token = $request->bearerToken()
+            ?: (string) ($request->header('X-Admin-Token') ?: $request->input('admin_token') ?: '');
+        if ($token !== '') {
+            Cache::forget('admin_token_' . hash('sha256', $token));
+            Admin::where('api_token', $token)->update(['api_token' => null]);
+        }
+
         return response()->json(['success' => true, 'message' => 'Session terminated.']);
     }
 

@@ -110,12 +110,14 @@ class LifeRouteApiTest extends TestCase
         $userOtp = $this->postJson('/api/auth/otp/send', ['phone' => '9840010801'])->assertOk();
         $code = $userOtp->json('dev_otp');
 
-        $this->postJson('/api/auth/otp/verify', ['phone' => '9840010801', 'otp' => $code])
+        $uVerify = $this->postJson('/api/auth/otp/verify', ['phone' => '9840010801', 'otp' => $code])
             ->assertOk()
             ->assertJsonPath('status', 'success')
             ->assertJsonPath('user.name', '');
+        $userToken = $uVerify->json('token');
 
-        $this->putJson('/api/user/profile', ['phone' => '9840010801', 'name' => 'Anil Kumar'])
+        $this->withToken($userToken)
+            ->putJson('/api/user/profile', ['phone' => '9840010801', 'name' => 'Anil Kumar'])
             ->assertOk()
             ->assertJsonPath('user.name', 'Anil Kumar');
 
@@ -123,7 +125,7 @@ class LifeRouteApiTest extends TestCase
             ->assertOk()
             ->assertJsonPath('status', 'success');
 
-        $created = $this->postJson('/api/bookings', [
+        $created = $this->withToken($userToken)->postJson('/api/bookings', [
             'patient_name' => 'Anil Kumar',
             'patient_phone' => '+91 98765 12345',
             'pickup_address' => '100 Feet Rd, Indiranagar',
@@ -192,12 +194,12 @@ class LifeRouteApiTest extends TestCase
             }
         }
 
-        $this->postJson("/api/bookings/{$bookingId}/chat", [
+        $this->withToken($driverToken)->postJson("/api/bookings/{$bookingId}/chat", [
             'message' => 'Arriving at Gate 2 now',
             'sender' => 'driver',
         ])->assertOk();
 
-        $this->getJson("/api/bookings/{$bookingId}/chat")
+        $this->withToken($userToken)->getJson("/api/bookings/{$bookingId}/chat")
             ->assertOk()
             ->assertJsonCount(1, 'messages');
 
@@ -207,26 +209,31 @@ class LifeRouteApiTest extends TestCase
                 'handover_notes' => 'Transferred to ICU Bay #3',
             ])->assertOk();
 
-        $this->getJson('/api/bookings/history')->assertOk()->assertJsonCount(1, 'bookings');
+        $this->withToken($userToken)->getJson('/api/bookings/history')->assertOk()->assertJsonCount(1, 'bookings');
         $this->withToken($driverToken)->getJson('/api/v1/driver/trips/history')->assertOk()->assertJsonCount(1, 'trips');
         $this->assertDatabaseHas('bookings', ['id' => $bookingId, 'status' => 'trip_completed']);
     }
 
     public function test_booking_creation_rejects_missing_or_zero_gps(): void
     {
+        $uToken = $this->postJson('/api/user/auth/login', [
+            'phone' => '9876500001',
+            'name' => 'Ramesh Test',
+        ])->assertOk()->json('token');
+
         // 0.0, 0.0 coordinates must be rejected with 422
-        $this->postJson('/api/bookings', [
+        $this->withToken($uToken)->postJson('/api/bookings', [
             'patient_name' => 'Ramesh Test',
-            'patient_phone' => '+91 98765 00000',
+            'patient_phone' => '+91 98765 00001',
             'pickup_address' => 'Empty GPS Location',
             'pickup_lat' => 0.0,
             'pickup_lng' => 0.0,
         ])->assertStatus(422)->assertJsonValidationErrors(['pickup_lat', 'pickup_lng']);
 
         // Missing coordinates must be rejected with 422
-        $this->postJson('/api/bookings', [
+        $this->withToken($uToken)->postJson('/api/bookings', [
             'patient_name' => 'Ramesh Test',
-            'patient_phone' => '+91 98765 00000',
+            'patient_phone' => '+91 98765 00001',
             'pickup_address' => 'Null GPS Location',
         ])->assertStatus(422)->assertJsonValidationErrors(['pickup_lat', 'pickup_lng']);
     }
@@ -244,7 +251,12 @@ class LifeRouteApiTest extends TestCase
         $driverToken = $reg->json('token');
         $driverId = $reg->json('driver.id');
 
-        $created = $this->postJson('/api/bookings', [
+        $uToken = $this->postJson('/api/user/auth/login', [
+            'phone' => '9111122222',
+            'name' => 'Critical Patient',
+        ])->assertOk()->json('token');
+
+        $created = $this->withToken($uToken)->postJson('/api/bookings', [
             'patient_name' => 'Critical Patient',
             'patient_phone' => '+91 91111 22222',
             'pickup_address' => 'Highways Junction',
@@ -289,7 +301,12 @@ class LifeRouteApiTest extends TestCase
         ])->assertOk();
         $token2 = $driver2->json('token');
 
-        $booking = $this->postJson('/api/bookings', [
+        $uToken = $this->postJson('/api/user/auth/login', [
+            'phone' => '9777733333',
+            'name' => 'Protected Patient',
+        ])->assertOk()->json('token');
+
+        $booking = $this->withToken($uToken)->postJson('/api/bookings', [
             'patient_name' => 'Protected Patient',
             'patient_phone' => '+91 97777 33333',
             'pickup_address' => 'Driver One Sector',
@@ -353,5 +370,71 @@ class LifeRouteApiTest extends TestCase
             ])->assertOk()->assertJsonPath('status', 'success');
 
         $this->assertSame('cancelled', \App\Models\Booking::find($bookingId)->status);
+    }
+
+    public function test_unauthenticated_admin_user_booking_and_db_export_are_rejected(): void
+    {
+        $this->getJson('/api/v1/dashboard/stats')->assertStatus(401);
+        $this->getJson('/api/v1/users')->assertStatus(401);
+        $this->getJson('/api/v1/tracking/live')->assertStatus(401);
+        $this->getJson('/api/v1/database/export')->assertStatus(401);
+        $this->getJson('/api/user/profile')->assertStatus(401);
+        $this->postJson('/api/bookings', ['pickup_lat' => 13.0, 'pickup_lng' => 80.0])->assertStatus(401);
+        $this->getJson('/api/bookings/12345')->assertStatus(401);
+
+        // Valid admin bearer token succeeds and logout revokes it
+        $adminToken = $this->postJson('/api/v1/auth/login', [
+            'email' => 'admin@gmail.com',
+            'password' => 'Admin@1234',
+        ])->assertOk()->json('token');
+
+        $this->withToken($adminToken)->getJson('/api/v1/dashboard/stats')->assertOk();
+        $this->withToken($adminToken)->postJson('/api/v1/auth/logout')->assertOk();
+        $this->withToken($adminToken)->getJson('/api/v1/dashboard/stats')->assertStatus(401);
+    }
+
+    public function test_user_sim_mismatch_and_broadcasting_auth_guards(): void
+    {
+        // Mobile client without active SIM must fail
+        $this->postJson('/api/user/auth/login', [
+            'phone' => '9840011999',
+            'name' => 'No Sim User',
+            'platform' => 'android',
+            'has_sim' => false,
+        ])->assertStatus(403);
+
+        // Entered phone mismatched with device SIM must fail
+        $this->postJson('/api/user/auth/login', [
+            'phone' => '9840011223',
+            'name' => 'Sim Mismatch User',
+            'platform' => 'android',
+            'has_sim' => true,
+            'has_permission' => true,
+            'sim_number' => '+919998887776',
+        ])->assertStatus(403);
+
+        // Broadcasting auth denies unauthenticated and cross-driver requests
+        $this->postJson('/api/broadcasting/auth', [
+            'channel_name' => 'private-driver.1',
+            'socket_id' => '1234.5678',
+        ])->assertStatus(401);
+
+        $d1 = $this->postJson('/api/v1/driver/auth/register', [
+            'name' => 'Auth Driver',
+            'phone' => '9666611111',
+            'ambulance' => ['registration_number' => 'TN-55-XX-1001', 'vehicle_type' => 'als'],
+        ])->assertOk();
+        $dToken = $d1->json('token');
+        $dId = $d1->json('driver.id');
+
+        $this->withToken($dToken)->postJson('/api/broadcasting/auth', [
+            'channel_name' => 'private-driver.' . ($dId + 100),
+            'socket_id' => '1234.5678',
+        ])->assertStatus(403);
+
+        $this->withToken($dToken)->postJson('/api/broadcasting/auth', [
+            'channel_name' => "private-driver.{$dId}",
+            'socket_id' => '1234.5678',
+        ])->assertOk()->assertJsonStructure(['auth']);
     }
 }

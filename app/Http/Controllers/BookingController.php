@@ -7,7 +7,9 @@ use App\Models\Driver;
 use App\Models\DriverNotification;
 use App\Models\Hospital;
 use App\Models\User;
+use App\Services\DriverAuthResolver;
 use App\Services\PhoneHelper;
+use App\Services\UserAuthResolver;
 use App\Services\WebSocketBroadcaster;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -153,25 +155,20 @@ class BookingController extends Controller
         $initialMeters = round($initialKm * 1000.0, 1);
         $initialEta = PhoneHelper::estimateEtaMinutes($initialKm);
 
-        $bearerToken = $request->bearerToken();
-        $userId = null;
-        if ($bearerToken) {
-            $cachedId = Cache::get('token_user_' . $bearerToken);
-            if ($cachedId) {
-                $userId = $cachedId;
-            }
+        $authUser = UserAuthResolver::resolveUser($request);
+        if (!$authUser) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Unauthorized: Please sign in with your verified mobile SIM before requesting dispatch.',
+            ], 401);
         }
-        if (!$userId && $request->user() instanceof User) {
-            $userId = $request->user()->id;
+
+        $userId = $authUser->id;
+        if ($patientPhone === '') {
+            $patientPhone = (string) ($authUser->phone ?? '');
         }
-        if (!$userId && !empty($patientPhone)) {
-            $norm = PhoneHelper::normalizePhone10($patientPhone);
-            if ($norm) {
-                $matchedUser = User::where('phone_key', $norm)->orWhere('phone', 'like', "%{$norm}%")->first();
-                if ($matchedUser) {
-                    $userId = $matchedUser->id;
-                }
-            }
+        if ($patientName === '') {
+            $patientName = (string) ($authUser->name ?? '');
         }
 
         $booking = Booking::create([
@@ -234,38 +231,25 @@ class BookingController extends Controller
 
     public function history(Request $request): JsonResponse
     {
-        $rawPhone = trim((string) ($request->query('phone') ?? $request->header('X-User-Phone') ?? ''));
-        $phone10 = $rawPhone !== '' ? PhoneHelper::normalizePhone10($rawPhone) : '';
-
-        if ($phone10 === '') {
-            $bearerToken = $request->bearerToken();
-            if ($bearerToken) {
-                $userId = Cache::get('token_user_' . $bearerToken);
-                if ($userId) {
-                    $user = User::find($userId);
-                    if ($user && $user->phone) {
-                        $phone10 = PhoneHelper::normalizePhone10((string) $user->phone);
-                    }
-                }
-            } elseif ($request->user() instanceof User && $request->user()->phone) {
-                $phone10 = PhoneHelper::normalizePhone10((string) $request->user()->phone);
-            }
-        }
-
-        if ($phone10 === '' && !app()->runningUnitTests()) {
+        $authUser = UserAuthResolver::resolveUser($request);
+        if (!$authUser) {
             return response()->json([
-                'status' => 'success',
-                'bookings' => [],
-                'history' => [],
-            ]);
+                'status' => 'error',
+                'message' => 'Unauthorized: Valid user session required.',
+            ], 401);
         }
 
-        $query = Booking::with('driver')->orderByDesc('created_at');
-        if ($phone10 !== '') {
-            $query->where('callback_phone', 'like', "%{$phone10}%");
-        }
+        $phone10 = $authUser->phone ? PhoneHelper::normalizePhone10((string) $authUser->phone) : '';
 
-        $bookings = $query->get()
+        $bookings = Booking::with('driver')
+            ->where(function ($q) use ($authUser, $phone10) {
+                $q->where('user_id', $authUser->id);
+                if ($phone10 !== '') {
+                    $q->orWhere('callback_phone', 'like', "%{$phone10}%");
+                }
+            })
+            ->orderByDesc('created_at')
+            ->get()
             ->map(static fn (Booking $b) => $b->toUserBookingJson())
             ->values();
 
@@ -276,8 +260,19 @@ class BookingController extends Controller
         ]);
     }
 
-    public function show(string $id): JsonResponse
+    public function show(Request $request, string $id): JsonResponse
     {
+        $admin = AdminApiController::resolveAdmin($request);
+        $driver = DriverAuthResolver::resolveDriver($request);
+        $user = UserAuthResolver::resolveUser($request);
+
+        if (!$admin && !$driver && !$user) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Unauthorized: Bearer authentication required.',
+            ], 401);
+        }
+
         $booking = $this->findBookingByKey($id);
 
         if (!$booking) {
@@ -285,6 +280,26 @@ class BookingController extends Controller
                 'status' => 'error',
                 'message' => 'Booking not found.',
             ], 404);
+        }
+
+        if (!$admin) {
+            $isDriverParticipant = $driver && (int) $booking->driver_id === (int) $driver->id;
+            $isUserParticipant = false;
+            if ($user) {
+                if ($booking->user_id && (int) $booking->user_id === (int) $user->id) {
+                    $isUserParticipant = true;
+                } elseif (!$booking->user_id) {
+                    $uPhone = PhoneHelper::normalizePhone10((string) $user->phone);
+                    $bPhone = PhoneHelper::normalizePhone10((string) $booking->callback_phone);
+                    $isUserParticipant = $uPhone !== '' && $uPhone === $bPhone;
+                }
+            }
+            if (!$isDriverParticipant && !$isUserParticipant) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Forbidden: You are not authorized to inspect this booking.',
+                ], 403);
+            }
         }
 
         return response()->json([
