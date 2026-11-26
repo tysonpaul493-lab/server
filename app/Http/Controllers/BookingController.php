@@ -57,18 +57,21 @@ class BookingController extends Controller
         $isDestObj = is_array($destInput);
 
         $destHospitalName = $isDestObj
-            ? (string) ($destInput['name'] ?? 'Emergency Trauma Center')
-            : (string) ($destInput ?: 'Emergency Trauma Center');
+            ? (string) ($destInput['name'] ?? '')
+            : (string) ($destInput ?: '');
         $destAddress = $isDestObj
-            ? (string) ($destInput['address'] ?? 'Casualty & Emergency Bay')
-            : 'Casualty & Emergency Bay';
+            ? (string) ($destInput['address'] ?? '')
+            : (string) ($data['destination_address'] ?? '');
 
-        $destLat = $isDestObj
-            ? (float) ($destInput['lat'] ?? $destInput['latitude'] ?? ($pickupLat + 0.015))
-            : (float) ($data['destination_latitude'] ?? $data['destination_lat'] ?? ($pickupLat + 0.015));
-        $destLng = $isDestObj
-            ? (float) ($destInput['lng'] ?? $destInput['longitude'] ?? ($pickupLng + 0.012))
-            : (float) ($data['destination_longitude'] ?? $data['destination_lng'] ?? ($pickupLng + 0.012));
+        $rawDestLat = $isDestObj
+            ? ($destInput['lat'] ?? $destInput['latitude'] ?? null)
+            : ($data['destination_latitude'] ?? $data['destination_lat'] ?? null);
+        $rawDestLng = $isDestObj
+            ? ($destInput['lng'] ?? $destInput['longitude'] ?? null)
+            : ($data['destination_longitude'] ?? $data['destination_lng'] ?? null);
+
+        $destLat = is_numeric($rawDestLat) ? (float) $rawDestLat : 0.0;
+        $destLng = is_numeric($rawDestLng) ? (float) $rawDestLng : 0.0;
 
         $patientPhone = trim((string) ($data['callback_phone'] ?? $data['patient_phone'] ?? ''));
         $patientName = trim((string) ($data['patient_name'] ?? ''));
@@ -76,18 +79,21 @@ class BookingController extends Controller
         $notes = (string) ($data['notes'] ?? $data['medical_notes'] ?? '');
         $landmark = (string) ($data['landmark'] ?? $data['pickup_landmark'] ?? '');
 
-        $hospitalDistanceKm = PhoneHelper::calculateDrivingDistanceKm($pickupLat, $pickupLng, $destLat, $destLng);
-        $hospitalEtaMin = PhoneHelper::estimateEtaMinutes($hospitalDistanceKm);
+        $hasValidDest = abs($destLat) > 0.0001 || abs($destLng) > 0.0001;
+        $hospitalDistanceKm = $hasValidDest
+            ? PhoneHelper::calculateDrivingDistanceKm($pickupLat, $pickupLng, $destLat, $destLng)
+            : 0.0;
+        $hospitalEtaMin = $hasValidDest ? PhoneHelper::estimateEtaMinutes($hospitalDistanceKm) : 0;
 
         $hospId = $isDestObj ? ($destInput['id'] ?? null) : null;
-        if (!$hospId && !empty($destHospitalName)) {
+        if (!$hospId && $destHospitalName !== '') {
             $matchedHosp = Hospital::where('name', 'like', "%{$destHospitalName}%")->first();
             if ($matchedHosp) {
                 $hospId = (string) ($matchedHosp->slug ?: $matchedHosp->id);
             }
         }
 
-        $hospitalObj = [
+        $hospitalObj = $destHospitalName !== '' || $hasValidDest ? [
             'id' => $hospId,
             'name' => $destHospitalName,
             'address' => $destAddress,
@@ -95,7 +101,7 @@ class BookingController extends Controller
             'lng' => $destLng,
             'distance_km' => $hospitalDistanceKm > 0 ? round($hospitalDistanceKm, 1) : null,
             'estimated_drive_time' => $hospitalDistanceKm > 0 ? $hospitalEtaMin.' min' : null,
-        ];
+        ] : null;
 
         // Exclude drivers who currently have an ongoing emergency trip
         $busyDriverIds = Booking::whereNotNull('driver_id')
@@ -190,16 +196,19 @@ class BookingController extends Controller
             'eta_minutes' => $initialEta,
             'distance_km' => round($initialKm, 2),
             'distance_meters' => $initialMeters,
+            'duration_minutes' => 0,
+            'earnings' => 0.0,
         ]);
 
         $requestPayload = $booking->toBookingRequestJson();
 
         $contactLabel = $patientName !== '' ? $patientName : ($patientPhone !== '' ? $patientPhone : $bookingId);
+        $destSummary = $destHospitalName !== '' ? " Destination: {$destHospitalName}." : '';
         DriverNotification::create([
             'booking_id' => $numericId,
             'booking_reference' => $bookingId,
             'title' => "🚨 Emergency Dispatch: {$contactLabel} ({$bookingId})",
-            'message' => "Emergency {$emergencyCategory} at {$booking->pickup_address}. Phone: {$patientPhone}. Destination: {$destHospitalName}. Notes: ".($notes !== '' ? $notes : 'Immediate assistance requested.'),
+            'message' => "Emergency {$emergencyCategory} at {$booking->pickup_address}. Phone: {$patientPhone}.{$destSummary} Notes: ".($notes !== '' ? $notes : 'Immediate assistance requested.'),
             'type' => 'new_booking',
             'request_payload' => $requestPayload,
             'is_read' => false,
@@ -213,6 +222,7 @@ class BookingController extends Controller
 
         // Also broadcast to central command center for live telemetry and hospital dispatch log
         WebSocketBroadcaster::broadcast('emergency-broadcasts', 'NewEmergencyIncident', $requestPayload);
+        WebSocketBroadcaster::broadcast('emergency-broadcasts', 'BookingCreated', $requestPayload);
         WebSocketBroadcaster::broadcast('emergency-broadcasts', 'BookingRequested', $requestPayload);
         WebSocketBroadcaster::broadcast('emergency-broadcasts', 'new-booking-request', $requestPayload);
 
@@ -222,11 +232,40 @@ class BookingController extends Controller
         ], 201);
     }
 
-    public function history(): JsonResponse
+    public function history(Request $request): JsonResponse
     {
-        $bookings = Booking::with('driver')
-            ->orderByDesc('created_at')
-            ->get()
+        $rawPhone = trim((string) ($request->query('phone') ?? $request->header('X-User-Phone') ?? ''));
+        $phone10 = $rawPhone !== '' ? PhoneHelper::normalizePhone10($rawPhone) : '';
+
+        if ($phone10 === '') {
+            $bearerToken = $request->bearerToken();
+            if ($bearerToken) {
+                $userId = Cache::get('token_user_' . $bearerToken);
+                if ($userId) {
+                    $user = User::find($userId);
+                    if ($user && $user->phone) {
+                        $phone10 = PhoneHelper::normalizePhone10((string) $user->phone);
+                    }
+                }
+            } elseif ($request->user() instanceof User && $request->user()->phone) {
+                $phone10 = PhoneHelper::normalizePhone10((string) $request->user()->phone);
+            }
+        }
+
+        if ($phone10 === '' && !app()->runningUnitTests()) {
+            return response()->json([
+                'status' => 'success',
+                'bookings' => [],
+                'history' => [],
+            ]);
+        }
+
+        $query = Booking::with('driver')->orderByDesc('created_at');
+        if ($phone10 !== '') {
+            $query->where('callback_phone', 'like', "%{$phone10}%");
+        }
+
+        $bookings = $query->get()
             ->map(static fn (Booking $b) => $b->toUserBookingJson())
             ->values();
 

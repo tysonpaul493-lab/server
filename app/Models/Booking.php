@@ -172,12 +172,12 @@ class Booking extends Model
     public function toTripModelJson(): array
     {
         $destObj = is_array($this->destination_hospital) ? $this->destination_hospital : [];
-        $destName = $destObj['name'] ?? ($this->destination_address ?: 'Emergency Hospital');
-        $destAddress = $destObj['address'] ?? ($this->destination_address ?: 'Casualty & Emergency Ward');
+        $destName = $destObj['name'] ?? ($this->destination_address ?: '');
+        $destAddress = $destObj['address'] ?? ($this->destination_address ?: '');
         $pickupLat = (float) ($this->pickup_lat ?: 0.0);
         $pickupLng = (float) ($this->pickup_lng ?: 0.0);
-        $destLat = (float) ($destObj['lat'] ?? $destObj['latitude'] ?? $this->destination_latitude ?: $pickupLat);
-        $destLng = (float) ($destObj['lng'] ?? $destObj['longitude'] ?? $this->destination_longitude ?: $pickupLng);
+        $destLat = (float) ($destObj['lat'] ?? $destObj['latitude'] ?? $this->destination_latitude ?: 0.0);
+        $destLng = (float) ($destObj['lng'] ?? $destObj['longitude'] ?? $this->destination_longitude ?: 0.0);
         $metrics = $this->computePhaseMetrics();
         $driverModel = $this->relationLoaded('driver') ? $this->driver : $this->driver()->first();
 
@@ -193,7 +193,7 @@ class Booking extends Model
             'ambulance_plate' => $driverModel ? ($driverModel->vehicle_plate ?: ($driverModel->vehicle_number ?: '')) : '',
             'vehicle_model' => $driverModel ? ($driverModel->vehicle_model ?: '') : '',
             'vehicle_type' => $driverModel ? Driver::normalizeVehicleType($driverModel->vehicle_type) : '',
-            'pickup_address' => $this->pickup_address,
+            'pickup_address' => $this->pickup_address ?? '',
             'pickup_landmark' => $this->pickup_landmark ?? '',
             'pickup_latitude' => $pickupLat,
             'pickup_longitude' => $pickupLng,
@@ -201,15 +201,15 @@ class Booking extends Model
             'destination_address' => $destAddress,
             'destination_latitude' => $destLat,
             'destination_longitude' => $destLng,
-            'emergency_notes' => $this->notes ?: 'Priority ambulance transit required.',
-            'special_access_instructions' => 'Emergency Ambulance Bay entrance.',
-            'emergency_category' => $this->emergency_category ?: 'Critical',
+            'emergency_notes' => $this->notes ?? '',
+            'special_access_instructions' => $this->essential_instructions ?? '',
+            'emergency_category' => $this->emergency_category ?? '',
             'status' => $this->status ?: 'accepted',
             'distance_remaining_meters' => $metrics['distance_meters'],
             'distance_km' => $metrics['distance_km'],
             'eta_remaining' => $metrics['eta_minutes'] <= 0 ? 'Arrived' : $metrics['eta_minutes'].' mins',
-            'created_at' => ($this->created_at ?? now())->toIso8601String(),
-            'accepted_at' => ($this->accepted_at ?? now())->toIso8601String(),
+            'created_at' => $this->created_at?->toIso8601String(),
+            'accepted_at' => $this->accepted_at?->toIso8601String(),
             'arrived_pickup_at' => $this->arrived_pickup_at?->toIso8601String(),
             'patient_picked_up_at' => $this->patient_picked_up_at?->toIso8601String(),
             'completed_at' => $this->completed_at?->toIso8601String(),
@@ -220,24 +220,24 @@ class Booking extends Model
     public function toBookingRequestJson(): array
     {
         $destObj = is_array($this->destination_hospital) ? $this->destination_hospital : [];
-        $destName = $destObj['name'] ?? 'Emergency Hospital';
-        $destAddress = $destObj['address'] ?? ($this->destination_address ?: 'Casualty & Emergency Ward');
+        $destName = $destObj['name'] ?? ($this->destination_address ?: '');
+        $destAddress = $destObj['address'] ?? ($this->destination_address ?: '');
         $pickupLat = (float) ($this->pickup_lat ?: 0.0);
         $pickupLng = (float) ($this->pickup_lng ?: 0.0);
-        $destLat = (float) ($destObj['lat'] ?? $destObj['latitude'] ?? $this->destination_latitude ?: $pickupLat);
-        $destLng = (float) ($destObj['lng'] ?? $destObj['longitude'] ?? $this->destination_longitude ?: $pickupLng);
+        $destLat = (float) ($destObj['lat'] ?? $destObj['latitude'] ?? $this->destination_latitude ?: 0.0);
+        $destLng = (float) ($destObj['lng'] ?? $destObj['longitude'] ?? $this->destination_longitude ?: 0.0);
         $metrics = $this->computePhaseMetrics();
 
         $createdAt = $this->created_at ? \Carbon\Carbon::parse($this->created_at) : now();
         $elapsed = (int) now()->diffInSeconds($createdAt, true);
-        $countdown = max(15, 120 - $elapsed);
+        $countdown = max(0, 120 - $elapsed);
 
         return [
             'id' => (int) $this->id,
             'booking_reference' => $this->booking_reference ?: '#LR-'.$this->id,
             'patient_name' => $this->patient_name ?? '',
             'patient_phone' => $this->callback_phone ?? '',
-            'pickup_address' => $this->pickup_address,
+            'pickup_address' => $this->pickup_address ?? '',
             'pickup_landmark' => $this->pickup_landmark ?? '',
             'pickup_latitude' => $pickupLat,
             'pickup_longitude' => $pickupLng,
@@ -245,12 +245,12 @@ class Booking extends Model
             'destination_address' => $destAddress,
             'destination_latitude' => $destLat,
             'destination_longitude' => $destLng,
-            'emergency_category' => $this->emergency_category ?: 'Critical',
-            'essential_instructions' => $this->notes ?: ($this->essential_instructions ?: 'Urgent medical assistance requested.'),
+            'emergency_category' => $this->emergency_category ?? '',
+            'essential_instructions' => $this->notes ?: ($this->essential_instructions ?? ''),
             'distance_meters' => $metrics['distance_meters'],
             'estimated_eta_minutes' => $metrics['eta_minutes'],
             'countdown_seconds' => $countdown,
-            'created_at' => ($this->created_at ?? now())->toIso8601String(),
+            'created_at' => $this->created_at?->toIso8601String(),
         ];
     }
 
@@ -265,38 +265,33 @@ class Booking extends Model
             ? PhoneHelper::calculateDrivingDistanceKm($pickupLat, $pickupLng, $destLat, $destLng)
             : 0.0;
         $tripKm = (float) ($this->distance_km ?: $computedKm);
-        if ($tripKm <= 0.0) {
-            $tripKm = 6.4;
-        }
 
         $accepted = $this->accepted_at ? \Carbon\Carbon::parse($this->accepted_at) : ($this->created_at ? \Carbon\Carbon::parse($this->created_at) : null);
         $completed = $this->completed_at ? \Carbon\Carbon::parse($this->completed_at) : ($this->updated_at ? \Carbon\Carbon::parse($this->updated_at) : null);
         $diffMinutes = ($accepted && $completed) ? (int) $completed->diffInMinutes($accepted) : 0;
-        $duration = ($diffMinutes >= 5 && $diffMinutes <= 120)
-            ? $diffMinutes
-            : max(10, (int) round($tripKm * 2.2));
+        $duration = (int) ($this->duration_minutes ?: $diffMinutes);
 
         return [
             'id' => (int) $this->id,
             'booking_reference' => $this->booking_reference ?: ('BK-'.$this->id),
-            'patient_name' => $this->patient_name ?? 'Emergency Requester',
+            'patient_name' => $this->patient_name ?? '',
             'patient_phone' => $this->callback_phone ?? '',
-            'pickup_address' => $this->pickup_address ?: 'Pickup Location',
-            'destination_hospital' => $destObj['name'] ?? ($this->destination_address ?: 'Regional Emergency & Trauma Hospital'),
-            'emergency_category' => $this->emergency_category ?: 'Critical Emergency',
+            'pickup_address' => $this->pickup_address ?? '',
+            'destination_hospital' => $destObj['name'] ?? ($this->destination_address ?? ''),
+            'emergency_category' => $this->emergency_category ?? '',
             'distance_km' => round($tripKm, 1),
             'duration_minutes' => $duration,
-            'earnings' => (float) ($this->earnings ?: round(250 + ($tripKm * 28))),
-            'started_at' => ($accepted ?? now()->subMinutes($duration))->toIso8601String(),
-            'accepted_at' => ($accepted ?? now()->subMinutes($duration))->toIso8601String(),
-            'created_at' => ($this->created_at ?? now()->subMinutes($duration))->toIso8601String(),
-            'completed_at' => ($completed ?? now())->toIso8601String(),
-            'handover_notes' => $this->handover_notes ?: 'Handover successfully signed & transferred to Casualty ER triage.',
-            'is_paid' => true,
-            'payment_status' => 'Paid',
-            'payment_method' => '108 Emergency / Free Govt Service',
-            'ambulance_plate' => $this->driver?->vehicle_plate ?: ($this->driver?->vehicle_number ?: 'TN38-EMG-108'),
-            'status' => 'Completed & Handover Signed',
+            'earnings' => (float) ($this->earnings ?? 0.0),
+            'started_at' => $accepted?->toIso8601String(),
+            'accepted_at' => $accepted?->toIso8601String(),
+            'created_at' => $this->created_at?->toIso8601String(),
+            'completed_at' => $completed?->toIso8601String(),
+            'handover_notes' => $this->handover_notes ?? '',
+            'is_paid' => (float) ($this->earnings ?? 0.0) > 0,
+            'payment_status' => (float) ($this->earnings ?? 0.0) > 0 ? 'Paid' : '108 Free Emergency',
+            'payment_method' => '108 Emergency Service',
+            'ambulance_plate' => $this->driver?->vehicle_plate ?: ($this->driver?->vehicle_number ?: ''),
+            'status' => $this->status ?: 'trip_completed',
         ];
     }
 }

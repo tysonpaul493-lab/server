@@ -113,7 +113,7 @@ class UserAuthController extends Controller
                 'public_id' => 'usr-'.((int) (microtime(true) * 1000)),
                 'name' => $inputName,
                 'phone' => '+91 ' . ($key ?: $phone),
-                'blood_group' => 'O+',
+                'blood_group' => '',
                 'emergency_notes' => '',
             ]);
         } else {
@@ -308,12 +308,12 @@ class UserAuthController extends Controller
         $user = User::findByPhone($digits);
 
         if (!$user) {
-            $userName = $inputName !== '' ? $inputName : 'Emergency Caller';
+            $userName = $inputName !== '' ? $inputName : '';
             $user = User::create([
                 'public_id' => 'usr-' . ((int) (microtime(true) * 1000)),
                 'name' => $userName,
                 'phone' => '+91 ' . $digits,
-                'blood_group' => 'O+',
+                'blood_group' => '',
                 'emergency_notes' => '',
             ]);
         } else {
@@ -328,7 +328,7 @@ class UserAuthController extends Controller
         return response()->json([
             'status' => 'success',
             'is_registered' => true,
-            'message' => 'Welcome, ' . $user->name . '!',
+            'message' => 'Welcome' . ($user->name !== '' ? ', ' . $user->name : '') . '!',
             'token' => $token,
             'user' => $user->toApiArray(),
         ]);
@@ -338,7 +338,7 @@ class UserAuthController extends Controller
     {
         $rawPhone = trim((string) ($request->input('phone') ?? ''));
         $inputName = trim((string) ($request->input('name') ?? ''));
-        $bloodGroup = trim((string) ($request->input('blood_group') ?? 'O+'));
+        $bloodGroup = trim((string) ($request->input('blood_group') ?? ''));
         $notes = trim((string) ($request->input('emergency_notes') ?? ''));
 
         $digits = preg_replace('/\D/', '', $rawPhone);
@@ -367,7 +367,7 @@ class UserAuthController extends Controller
             $user->update([
                 'name' => $inputName,
                 'phone' => $cleanPhone,
-                'blood_group' => $bloodGroup ?: 'O+',
+                'blood_group' => $bloodGroup,
                 'emergency_notes' => $notes,
             ]);
         } else {
@@ -375,7 +375,7 @@ class UserAuthController extends Controller
                 'public_id' => 'usr-' . ((int) (microtime(true) * 1000)),
                 'name' => $inputName,
                 'phone' => $cleanPhone,
-                'blood_group' => $bloodGroup ?: 'O+',
+                'blood_group' => $bloodGroup,
                 'emergency_notes' => $notes,
             ]);
         }

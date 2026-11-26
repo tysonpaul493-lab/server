@@ -2,58 +2,20 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Admin;
 use App\Models\Booking;
 use App\Models\Driver;
+use App\Models\Hospital;
 use App\Models\User;
 use App\Services\PhoneHelper;
 use App\Services\WebSocketBroadcaster;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\View\View;
 
 class AdminWebController extends Controller
 {
-    /**
-     * Predefined Admin Accounts Matrix
-     */
-    protected array $adminMatrix = [
-        'admin@gmail.com' => [
-            'name' => 'Super Administrator',
-            'role' => 'super_admin',
-            'role_name' => 'Super Administrator',
-            'password' => 'Admin@1234',
-            'department' => 'Emergency Central Command',
-        ],
-        'admin@ambulance.gov' => [
-            'name' => 'Commander Sarah Jenkins',
-            'role' => 'super_admin',
-            'role_name' => 'Super Administrator',
-            'password' => 'AdminSecure2026!',
-            'department' => 'Emergency Central Command',
-        ],
-        'dispatch@ambulance.gov' => [
-            'name' => 'Officer David Ross',
-            'role' => 'dispatcher',
-            'role_name' => 'Senior Dispatcher',
-            'password' => 'DispatchSecure2026!',
-            'department' => 'Emergency Dispatch Unit',
-        ],
-        'verifier@ambulance.gov' => [
-            'name' => 'Marcus Chen',
-            'role' => 'driver_verifier',
-            'role_name' => 'Driver Verification Officer',
-            'password' => 'VerifierSecure2026!',
-            'department' => 'Compliance & Licensing',
-        ],
-        'hospital@ambulance.gov' => [
-            'name' => 'Dr. Robert Vance',
-            'role' => 'hospital_manager',
-            'role_name' => 'Hospital Network Director',
-            'password' => 'HospitalSecure2026!',
-            'department' => 'Trauma Network Coordination',
-        ],
-    ];
-
     /**
      * Check if administrator session is authenticated
      */
@@ -90,37 +52,23 @@ class AdminWebController extends Controller
         $email = strtolower(trim($validated['email']));
         $password = $validated['password'];
 
-        $admin = $this->adminMatrix[$email] ?? null;
+        $admin = Admin::where('email', $email)->first();
 
-        if (!$admin) {
-            // Check if user exists in database
-            $dbUser = User::where('email', $email)->first();
-            if ($dbUser) {
-                $admin = [
-                    'name' => $dbUser->name,
-                    'role' => 'super_admin',
-                    'role_name' => 'System Administrator',
-                    'password' => 'AdminSecure2026!',
-                    'department' => 'Executive Command',
-                ];
-            }
-        }
-
-        if (!$admin || ($password !== $admin['password'] && $password !== 'Admin@1234' && $password !== 'AdminSecure2026!' && $password !== 'Password@123')) {
+        if (!$admin || !Hash::check($password, $admin->password)) {
             return back()->withInput()->with('error', 'Invalid administrative credentials provided. Access denied.');
         }
 
         // Store administrative session
         $request->session()->put('admin_user', [
-            'name' => $admin['name'],
-            'email' => $email,
-            'role' => $admin['role'],
-            'role_name' => $admin['role_name'],
-            'department' => $admin['department'],
+            'name' => $admin->name,
+            'email' => $admin->email,
+            'role' => $admin->role,
+            'role_name' => $admin->role_name,
+            'department' => $admin->badge_number ?: 'Emergency Central Command',
             'login_time' => now()->format('d M Y, H:i:s'),
         ]);
 
-        return redirect()->route('admin.dashboard')->with('success', 'Command session initialized successfully. Welcome, ' . $admin['name']);
+        return redirect()->route('admin.dashboard')->with('success', 'Command session initialized successfully. Welcome, ' . $admin->name);
     }
 
     /**
@@ -204,11 +152,11 @@ class AdminWebController extends Controller
                 'id' => $d->id,
                 'name' => $d->name,
                 'phone' => $d->phone,
-                'plate' => $d->vehicle_plate ?: ($d->vehicle_number ?: 'TN-38-EMG'),
+                'plate' => $d->vehicle_plate ?: ($d->vehicle_number ?: ''),
                 'type' => strtoupper($d->vehicle_type ?: 'ALS'),
                 'is_online' => (bool) $d->is_online,
-                'lat' => (float) ($d->lat ?: 11.0318),
-                'lng' => (float) ($d->lng ?: 76.9437),
+                'lat' => $d->lat !== null && (float) $d->lat != 0.0 ? (float) $d->lat : null,
+                'lng' => $d->lng !== null && (float) $d->lng != 0.0 ? (float) $d->lng : null,
                 'status' => $hasActiveTrip ? 'ON_TRIP' : ($d->is_online ? 'AVAILABLE' : 'OFFLINE'),
             ];
         });
@@ -220,14 +168,14 @@ class AdminWebController extends Controller
                 return [
                     'id' => $b->id,
                     'reference' => $b->booking_reference ?: '#BK-' . $b->id,
-                    'patient_name' => $b->patient_name ?: 'Emergency Patient',
-                    'patient_phone' => $b->callback_phone,
-                    'pickup_address' => $b->pickup_address,
-                    'pickup_lat' => (float) ($b->pickup_lat ?: 11.0318),
-                    'pickup_lng' => (float) ($b->pickup_lng ?: 76.9437),
+                    'patient_name' => $b->patient_name ?: '',
+                    'patient_phone' => $b->callback_phone ?: '',
+                    'pickup_address' => $b->pickup_address ?: '',
+                    'pickup_lat' => $b->pickup_lat !== null && (float) $b->pickup_lat != 0.0 ? (float) $b->pickup_lat : null,
+                    'pickup_lng' => $b->pickup_lng !== null && (float) $b->pickup_lng != 0.0 ? (float) $b->pickup_lng : null,
                     'severity' => strtoupper($b->emergency_category ?: 'CRITICAL'),
                     'status' => strtoupper($b->status),
-                    'driver_name' => $b->driver ? $b->driver->name : 'Searching...',
+                    'driver_name' => $b->driver ? $b->driver->name : 'Unassigned',
                 ];
             });
 
@@ -442,16 +390,16 @@ class AdminWebController extends Controller
 
             return [
                 'id' => $d->id,
-                'plate' => $d->vehicle_plate ?: ($d->vehicle_number ?: 'TN-38-EMG-' . $d->id),
-                'model' => $d->vehicle_model ?: 'Force Traveller Emergency ALS',
-                'year' => $d->vehicle_year ?: 2024,
+                'plate' => $d->vehicle_plate ?: ($d->vehicle_number ?: ''),
+                'model' => $d->vehicle_model ?: '',
+                'year' => $d->vehicle_year ?: null,
                 'type' => strtoupper($d->vehicle_type ?: 'ALS'),
-                'type_display' => $d->vehicle_type_display ?: 'Advanced Life Support (ICU)',
+                'type_display' => $d->vehicle_type_display ?: '',
                 'driver_name' => $d->name,
                 'driver_phone' => $d->phone,
                 'is_online' => $d->is_online,
                 'status' => $hasActiveTrip ? 'BUSY' : ($d->is_online ? 'AVAILABLE' : 'OFFLINE'),
-                'equipment' => $d->equipment_list ?: 'Defibrillator, Ventilator, Patient Monitor, Oxygen Pipeline, Spine Board',
+                'equipment' => is_array($d->equipment_list) ? implode(', ', $d->equipment_list) : (string) ($d->equipment_list ?? ''),
             ];
         });
 
@@ -465,8 +413,20 @@ class AdminWebController extends Controller
     {
         if ($redirect = $this->checkAdminAuth($request)) return $redirect;
 
-        $raw = (new HospitalController())->nearby(new Request(['lat' => 11.0318, 'lng' => 76.9437]));
-        $hospitals = $raw->getData(true)['hospitals'] ?? [];
+        $hospitals = Hospital::all()->map(function (Hospital $h) {
+            return [
+                'id' => (string) ($h->slug ?: $h->id),
+                'name' => $h->name,
+                'address' => $h->address ?? '',
+                'lat' => (float) $h->lat,
+                'lng' => (float) $h->lng,
+                'emergency_phone' => $h->emergency_phone ?? '',
+                'emergency_services' => is_array($h->emergency_services) ? $h->emergency_services : [],
+                'trauma_level' => $h->trauma_level ?? '',
+                'available_icu_beds' => $h->available_icu_beds,
+                'verified' => (bool) $h->verified,
+            ];
+        })->all();
 
         return view('admin.hospitals', compact('hospitals'));
     }

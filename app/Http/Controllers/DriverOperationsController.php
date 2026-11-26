@@ -41,17 +41,19 @@ class DriverOperationsController extends Controller
         $criticalCount = $completedTrips->filter(static fn (Booking $b) => stripos((string) $b->emergency_category, 'critical') !== false || stripos((string) $b->emergency_category, 'cardiac') !== false)->count();
         $earningsToday = (float) $completedTrips->sum(static fn (Booking $b) => (float) ($b->earnings ?: 0.0));
 
+        $onlineMinutes = (int) $completedTrips->sum(static fn (Booking $b) => (int) ($b->duration_minutes ?: 0));
+
         $summary = [
             'is_online' => (bool) $driver->is_online,
             'completed_trips_today' => $completedCount,
             'today_trips' => $completedCount,
             'distance_covered_km' => round($completedDistance, 1),
-            'online_hours' => round($completedCount * 0.4, 1),
+            'online_hours' => round($onlineMinutes / 60.0, 1),
             'earnings_today' => round($earningsToday, 2),
             'today_earnings' => round($earningsToday, 2),
             'emergency_critical_trips' => $criticalCount,
-            'total_trips' => (int) ($driver->total_trips ?: $completedCount),
-            'rating' => (float) ($driver->rating ?: 5.0),
+            'total_trips' => (int) ($driver->total_trips ?? $completedCount),
+            'rating' => (float) ($driver->rating ?? 0.0),
             'has_active_trip' => $activeTrip !== null,
             'active_trip_id' => $activeTrip ? $activeTrip['booking_reference'] : null,
             'active_trip' => $activeTrip,
@@ -75,20 +77,33 @@ class DriverOperationsController extends Controller
         if ($request->has('is_online')) {
             $updates['is_online'] = (bool) $request->input('is_online');
         }
-        if ($request->input('latitude') !== null) {
-            $updates['lat'] = (float) $request->input('latitude');
-        }
-        if ($request->input('longitude') !== null) {
-            $updates['lng'] = (float) $request->input('longitude');
+        $lat = $request->input('latitude');
+        $lng = $request->input('longitude');
+        if ($lat !== null && $lng !== null && is_numeric($lat) && is_numeric($lng)) {
+            $latF = (float) $lat;
+            $lngF = (float) $lng;
+            if ($latF != 0.0 || $lngF != 0.0) {
+                $updates['lat'] = $latF;
+                $updates['lng'] = $lngF;
+            }
         }
 
         if (!empty($updates)) {
             $driver->update($updates);
+            $driver->refresh();
         }
+
+        WebSocketBroadcaster::broadcast(['emergency-broadcasts', 'private-driver.' . $driver->id], 'DriverStatusUpdated', [
+            'driver_id' => (int) $driver->id,
+            'is_online' => (bool) $driver->is_online,
+            'latitude' => (float) $driver->lat,
+            'longitude' => (float) $driver->lng,
+            'timestamp' => now()->toIso8601String(),
+        ]);
 
         return response()->json([
             'status' => 'success',
-            'is_online' => (bool) $driver->fresh()->is_online,
+            'is_online' => (bool) $driver->is_online,
         ]);
     }
 
@@ -385,10 +400,10 @@ class DriverOperationsController extends Controller
 
             // Record location telemetry breadcrumbs
             try {
-                if (isset($driverUpdates['lat']) && isset($driverUpdates['lng'])) {
+                if (isset($driverUpdates['lat']) && isset($driverUpdates['lng']) && ((float) $driverUpdates['lat'] != 0.0 || (float) $driverUpdates['lng'] != 0.0)) {
                     DriverLocationHistory::create([
                         'driver_id' => $driver->id,
-                        'booking_id' => $activeBooking?->id,
+                        'booking_id' => $booking?->id,
                         'lat' => (float) $driverUpdates['lat'],
                         'lng' => (float) $driverUpdates['lng'],
                         'heading' => (float) ($driverUpdates['heading'] ?? $driver->heading ?? 0.0),
@@ -419,19 +434,21 @@ class DriverOperationsController extends Controller
         } elseif ($status === 'completed' || $status === 'trip_completed') {
             $bookingUpdates['status'] = 'trip_completed';
             $bookingUpdates['completed_at'] = now();
-            $bookingUpdates['handover_notes'] = (string) ($request->input('handover_notes') ?: 'Handover completed at Emergency Casualty.');
-            $tripDistKm = PhoneHelper::calculateDrivingDistanceKm(
-                (float) $booking->pickup_lat,
-                (float) $booking->pickup_lng,
-                (float) $booking->destination_latitude,
-                (float) $booking->destination_longitude
-            );
+            $bookingUpdates['handover_notes'] = (string) ($request->input('handover_notes') ?: '');
+            $hasDest = abs((float) $booking->destination_latitude) > 0.0001 || abs((float) $booking->destination_longitude) > 0.0001;
+            $tripDistKm = $hasDest
+                ? PhoneHelper::calculateDrivingDistanceKm(
+                    (float) $booking->pickup_lat,
+                    (float) $booking->pickup_lng,
+                    (float) $booking->destination_latitude,
+                    (float) $booking->destination_longitude
+                )
+                : (float) ($booking->distance_km ?: 0.0);
             $bookingUpdates['distance_km'] = round($tripDistKm, 2);
             $bookingUpdates['distance_meters'] = round($tripDistKm * 1000.0, 1);
             $bookingUpdates['eta_minutes'] = 0;
-            if ($booking->accepted_at) {
-                $bookingUpdates['duration_minutes'] = max(1, (int) $booking->accepted_at->diffInMinutes(now()));
-            }
+            $startTime = $booking->accepted_at ?? $booking->created_at;
+            $bookingUpdates['duration_minutes'] = $startTime ? max(1, (int) $startTime->diffInMinutes(now())) : 0;
             $driver->increment('total_trips');
         }
 
@@ -529,7 +546,11 @@ class DriverOperationsController extends Controller
         foreach (['latitude' => 'lat', 'longitude' => 'lng', 'heading' => 'heading', 'speed' => 'speed'] as $in => $col) {
             $val = $request->input($in);
             if ($val !== null && is_numeric($val)) {
-                $driverUpdates[$col] = (float) $val;
+                $fVal = (float) $val;
+                if (($col === 'lat' || $col === 'lng') && $fVal == 0.0) {
+                    continue;
+                }
+                $driverUpdates[$col] = $fVal;
             }
         }
         if (!empty($driverUpdates)) {

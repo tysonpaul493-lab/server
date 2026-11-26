@@ -59,11 +59,11 @@ class Ambulance extends Model
             'year' => $this->year,
             'status' => $this->status,
             'hospital_affiliation' => $this->hospital_affiliation,
-            'equipment_list' => $this->equipment_list ?? ['Ventilator', 'Defibrillator', 'Suction Unit', 'Oxygen Cylinders'],
-            'lat' => (float) $this->lat,
-            'lng' => (float) $this->lng,
-            'heading' => (float) $this->heading,
-            'speed' => (float) $this->speed,
+            'equipment_list' => $this->equipment_list ?? [],
+            'lat' => $this->lat !== null ? (float) $this->lat : null,
+            'lng' => $this->lng !== null ? (float) $this->lng : null,
+            'heading' => (float) ($this->heading ?? 0.0),
+            'speed' => (float) ($this->speed ?? 0.0),
             'fuel_level' => $this->fuel_level,
             'oxygen_level' => $this->oxygen_level,
             'driver' => $this->driver ? [
@@ -71,7 +71,7 @@ class Ambulance extends Model
                 'name' => $this->driver->name,
                 'phone' => $this->driver->phone,
             ] : null,
-            'last_telemetry_at' => $this->last_telemetry_at?->toIso8601String() ?? now()->toIso8601String(),
+            'last_telemetry_at' => $this->last_telemetry_at?->toIso8601String(),
         ];
     }
 }

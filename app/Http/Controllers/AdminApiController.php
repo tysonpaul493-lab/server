@@ -7,13 +7,17 @@ use App\Models\Ambulance;
 use App\Models\AuditLog;
 use App\Models\Booking;
 use App\Models\Driver;
+use App\Models\DriverDocument;
+use App\Models\DriverLocationHistory;
 use App\Models\Hospital;
 use App\Models\User;
 use App\Services\PhoneHelper;
 use App\Services\WebSocketBroadcaster;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Schema;
 
 class AdminApiController extends Controller
 {
@@ -60,15 +64,7 @@ class AdminApiController extends Controller
         }
 
         if ($admin->mfa_enabled && !empty($mfaCode)) {
-            // Verify TOTP or stored MFA secret
-            $validMfa = false;
-            if (!empty($admin->mfa_secret)) {
-                $validMfa = hash_equals($admin->mfa_secret, $mfaCode);
-            }
-            // In test environment, allow verified testing TOTP
-            if (app()->environment('testing', 'local') && in_array($mfaCode, ['123456', '654321'], true)) {
-                $validMfa = true;
-            }
+            $validMfa = !empty($admin->mfa_secret) && hash_equals($admin->mfa_secret, $mfaCode);
             if (!$validMfa) {
                 return response()->json(['success' => false, 'message' => 'Invalid Two-Factor authentication code.'], 401);
             }
@@ -137,9 +133,9 @@ class AdminApiController extends Controller
             ->whereDate('created_at', today())
             ->count();
 
-        // Total ambulances based on registered fleet in MySQL ambulances / drivers
+        // Total ambulances based on registered drivers + any standalone ambulance records
         $registeredAmbulances = Ambulance::count();
-        $totalAmbulances = $registeredAmbulances > 0 ? $registeredAmbulances : $totalDrivers;
+        $totalAmbulances = max($registeredAmbulances, $totalDrivers);
         $busyAmbulances = $busyDrivers;
         $availableAmbulances = $availableDrivers;
         $maintenanceAmbulances = Ambulance::where('status', 'maintenance')->count();
@@ -150,24 +146,24 @@ class AdminApiController extends Controller
             ->take(8)
             ->get()
             ->map(function (Booking $b) {
-                $hospName = is_array($b->destination_hospital) ? ($b->destination_hospital['name'] ?? 'Nearest Trauma Center') : ($b->destination_address ?: 'Emergency Hospital');
+                $hospName = is_array($b->destination_hospital) ? ($b->destination_hospital['name'] ?? '') : ($b->destination_address ?: '');
                 $driverName = $b->driver ? $b->driver->name : 'Unassigned';
-                $vehiclePlate = $b->driver ? ($b->driver->vehicle_plate ?: ($b->driver->vehicle_number ?: 'TN-38-EMG')) : 'N/A';
+                $vehiclePlate = $b->driver ? ($b->driver->vehicle_plate ?: ($b->driver->vehicle_number ?: '')) : '';
 
                 return [
                     'id' => (string) $b->id,
                     'reference' => $b->booking_reference ?: '#BK-' . $b->id,
                     'booking_reference' => $b->booking_reference ?: '#BK-' . $b->id,
-                    'patient_name' => $b->patient_name ?: 'Emergency Patient',
-                    'requester_name' => $b->patient_name ?: 'Emergency Patient',
-                    'patient_phone' => $b->callback_phone ?: ($b->user ? $b->user->phone : ''),
-                    'requester_phone' => $b->callback_phone ?: ($b->user ? $b->user->phone : ''),
-                    'pickup_address' => $b->pickup_address,
+                    'patient_name' => $b->patient_name ?: '',
+                    'requester_name' => $b->patient_name ?: '',
+                    'patient_phone' => $b->callback_phone ?: '',
+                    'requester_phone' => $b->callback_phone ?: '',
+                    'pickup_address' => $b->pickup_address ?: '',
                     'destination' => $hospName,
                     'hospital_name' => $hospName,
                     'hospital' => [
                         'name' => $hospName,
-                        'address' => $b->destination_address ?: 'Coimbatore Region',
+                        'address' => $b->destination_address ?: '',
                     ],
                     'driver_name' => $driverName,
                     'vehicle_plate' => $vehiclePlate,
@@ -194,15 +190,46 @@ class AdminApiController extends Controller
                 ];
             });
 
-        // Hourly trends computed dynamically
-        $hourlyTrends = [
-            ['hour' => '00:00', 'critical' => 1, 'severe' => 2, 'moderate' => 1],
-            ['hour' => '04:00', 'critical' => 0, 'severe' => 1, 'moderate' => 1],
-            ['hour' => '08:00', 'critical' => 3, 'severe' => 5, 'moderate' => 2],
-            ['hour' => '12:00', 'critical' => 4, 'severe' => 8, 'moderate' => 4],
-            ['hour' => '16:00', 'critical' => 2, 'severe' => 6, 'moderate' => 3],
-            ['hour' => now()->format('H:00'), 'critical' => $activeBookings, 'severe' => 2, 'moderate' => 1],
-        ];
+        // Compute genuine hourly trends from DB bookings created today
+        $todayBookings = Booking::whereDate('created_at', today())->get();
+        $buckets = [];
+        foreach (['00:00', '04:00', '08:00', '12:00', '16:00', '20:00'] as $slot) {
+            $buckets[$slot] = ['hour' => $slot, 'critical' => 0, 'severe' => 0, 'moderate' => 0];
+        }
+        foreach ($todayBookings as $tb) {
+            $h = $tb->created_at ? (int) $tb->created_at->format('G') : 0;
+            $slotIdx = (int) (floor($h / 4) * 4);
+            $slotKey = str_pad((string) $slotIdx, 2, '0', STR_PAD_LEFT) . ':00';
+            $catLower = strtolower((string) $tb->emergency_category);
+            if (str_contains($catLower, 'cardiac') || str_contains($catLower, 'stroke') || str_contains($catLower, 'critical')) {
+                $buckets[$slotKey]['critical']++;
+            } elseif (str_contains($catLower, 'trauma') || str_contains($catLower, 'accident') || str_contains($catLower, 'breath') || str_contains($catLower, 'burn')) {
+                $buckets[$slotKey]['severe']++;
+            } else {
+                $buckets[$slotKey]['moderate']++;
+            }
+        }
+        $hourlyTrends = array_values($buckets);
+
+        // Compute genuine average response & assignment times from real timestamps
+        $assignSeconds = [];
+        $responseSeconds = [];
+        foreach (Booking::whereNotNull('created_at')->whereNotNull('accepted_at')->get() as $tb) {
+            $assignSec = max(0, $tb->created_at->diffInSeconds($tb->accepted_at, false));
+            if ($assignSec >= 0 && $assignSec < 86400) {
+                $assignSeconds[] = $assignSec;
+            }
+            $arrivalRef = $tb->arrived_pickup_at ?: $tb->completed_at;
+            if ($arrivalRef) {
+                $respSec = max(0, $tb->created_at->diffInSeconds($arrivalRef, false));
+                if ($respSec >= 0 && $respSec < 86400) {
+                    $responseSeconds[] = $respSec;
+                }
+            }
+        }
+        $avgAssignSec = !empty($assignSeconds) ? (int) round(array_sum($assignSeconds) / count($assignSeconds)) : null;
+        $avgResponseSec = !empty($responseSeconds) ? (int) round(array_sum($responseSeconds) / count($responseSeconds)) : null;
+        $failedDispatches = Booking::where('status', 'failed')->count();
 
         return response()->json([
             'success' => true,
@@ -221,10 +248,10 @@ class AdminApiController extends Controller
                     'maintenance_ambulances' => ['value' => $maintenanceAmbulances, 'available' => true],
                     'active_bookings' => ['value' => $activeBookings, 'available' => true],
                     'completed_trips' => ['value' => $completedTrips, 'available' => true],
-                    'failed_dispatches' => ['value' => 0, 'available' => true],
+                    'failed_dispatches' => ['value' => $failedDispatches, 'available' => true],
                     'cancelled_trips' => ['value' => $cancelledTrips, 'available' => true],
-                    'avg_response_time_seconds' => ['value' => 380, 'available' => true],
-                    'avg_assignment_time_seconds' => ['value' => 42, 'available' => true],
+                    'avg_response_time_seconds' => ['value' => $avgResponseSec, 'available' => $avgResponseSec !== null],
+                    'avg_assignment_time_seconds' => ['value' => $avgAssignSec, 'available' => $avgAssignSec !== null],
                 ],
                 'hourly_trends' => $hourlyTrends,
                 'recent_activity' => $recentBookings,
@@ -304,12 +331,12 @@ class AdminApiController extends Controller
                 [
                     'vehicle_type' => strtolower($vehicleType),
                     'vehicle_type_display' => $vehicleType === 'ALS' ? 'Advanced Life Support (ALS)' : 'Basic Life Support (BLS)',
-                    'model' => 'Force Traveller ICU Specialist',
-                    'year' => 2024,
+                    'model' => (string) $request->input('model', $driver?->vehicle_model ?? ''),
+                    'year' => (int) $request->input('year', (int) date('Y')),
                     'status' => 'available',
                     'assigned_driver_id' => $driverId,
                     'hospital_affiliation' => $operator,
-                    'equipment_list' => (array) $request->input('equipment_capabilities', ['Oxygen', 'Defibrillator', 'Ventilator']),
+                    'equipment_list' => (array) $request->input('equipment_capabilities', []),
                     'lat' => $request->has('latitude') ? (float) $request->input('latitude') : null,
                     'lng' => $request->has('longitude') ? (float) $request->input('longitude') : null,
                     'speed' => 0.0,
@@ -327,18 +354,18 @@ class AdminApiController extends Controller
             'vehicle_type' => $vehicleType,
             'operator_name' => $operator,
             'primary_driver_id' => $driverId,
-            'equipment_capabilities' => (array) $request->input('equipment_capabilities', ['Oxygen', 'Defibrillator', 'Ventilator']),
+            'equipment_capabilities' => (array) $request->input('equipment_capabilities', []),
             'verification_status' => 'APPROVED',
-            'fitness_expiry' => (string) $request->input('fitness_expiry', '2027-12-31'),
-            'insurance_expiry' => (string) $request->input('insurance_expiry', '2027-12-31'),
-            'permit_expiry' => (string) $request->input('permit_expiry', '2027-12-31'),
+            'fitness_expiry' => (string) $request->input('fitness_expiry', ''),
+            'insurance_expiry' => (string) $request->input('insurance_expiry', ''),
+            'permit_expiry' => (string) $request->input('permit_expiry', ''),
             'operational_status' => 'AVAILABLE',
-            'latitude' => (float) $request->input('latitude', 11.0168),
-            'longitude' => (float) $request->input('longitude', 76.9558),
+            'latitude' => $request->input('latitude') !== null ? (float) $request->input('latitude') : null,
+            'longitude' => $request->input('longitude') !== null ? (float) $request->input('longitude') : null,
             'speed_kmh' => 0,
             'heading' => 0,
-            'battery_fuel_percentage' => 100,
-            'service_zone' => (string) $request->input('service_zone', 'Central'),
+            'battery_fuel_percentage' => null,
+            'service_zone' => (string) $request->input('service_zone', ''),
         ];
 
         return response()->json([
@@ -357,27 +384,39 @@ class AdminApiController extends Controller
                 ->whereNotIn('status', ['trip_completed', 'completed', 'cancelled'])
                 ->exists();
 
-            $completedTrips = (int) ($d->total_trips ?: Booking::where('driver_id', $d->id)->whereIn('status', ['trip_completed', 'completed'])->count());
-            $dbRevenue = (float) Booking::where('driver_id', $d->id)->whereIn('status', ['trip_completed', 'completed'])->sum('earnings');
-            $totalRevenue = $dbRevenue > 0 ? $dbRevenue : (float) (max(1, $completedTrips) * 1250);
+            $completedTrips = (int) ($d->total_trips ?? Booking::where('driver_id', $d->id)->whereIn('status', ['trip_completed', 'completed'])->count());
+            $totalRevenue = (float) Booking::where('driver_id', $d->id)->whereIn('status', ['trip_completed', 'completed'])->sum('earnings');
 
-            $vehiclePlate = $d->vehicle_plate ?: ($d->vehicle_number ?: 'TN-38-EMG-' . str_pad((string) $d->id, 4, '0', STR_PAD_LEFT));
+            $vehiclePlate = $d->vehicle_plate ?: ($d->vehicle_number ?: '');
             $vehicleType = strtoupper((string) ($d->vehicle_type ?: 'ALS'));
-            $permitNumber = 'TN-EMG-PERMIT-' . (1000 + (int) $d->id);
-            $insurancePolicy = 'POL-ICICI-LOMBARD-' . (789100 + (int) $d->id);
-            $licenceNumber = $d->license_number ?: 'DL-TN38-' . str_pad((string) $d->id, 5, '0', STR_PAD_LEFT);
-            $status = strtoupper((string) ($d->verification_status ?: 'APPROVED'));
+            $permitNumber = $d->permit_number ?: '';
+            $insurancePolicy = $d->insurance_policy_number ?: '';
+            $licenceNumber = $d->license_number ?: '';
+            $status = strtoupper((string) ($d->verification_status ?: 'PENDING'));
+
+            $dbDocs = DriverDocument::where('driver_id', $d->id)->get()->map(static function (DriverDocument $doc) use ($status) {
+                return [
+                    'id' => (int) $doc->id,
+                    'driver_id' => (int) $doc->driver_id,
+                    'document_type' => strtoupper((string) $doc->document_type),
+                    'document_name' => $doc->original_filename ?: str_replace('_', ' ', strtoupper((string) $doc->document_type)),
+                    'document_number' => '',
+                    'specification_match' => '',
+                    'file_path' => $doc->file_path ?: '',
+                    'verification_status' => $status,
+                ];
+            })->values()->all();
 
             return [
                 'id' => (int) $d->id,
                 'user_id' => (int) $d->id,
                 'full_name' => $d->name,
                 'phone' => $d->phone,
-                'email' => $d->email ?: strtolower(str_replace(' ', '', $d->name)) . '@paramedic.org',
+                'email' => $d->email ?: '',
                 'profile_photo_url' => null,
                 'licence_number' => $licenceNumber,
-                'licence_expiry' => $d->license_expiry_date ?: '2028-10-15',
-                'qualification_level' => 'PARAMEDIC EMT-P',
+                'licence_expiry' => $d->license_expiry_date ?: '',
+                'qualification_level' => $d->operator_affiliation ?: '',
                 'verification_status' => $status,
                 'online_status' => $d->is_online ? 'ONLINE' : 'OFFLINE',
                 'operational_status' => $hasActiveTrip ? 'ON_TRIP' : ($d->is_online ? 'AVAILABLE' : 'OFFLINE'),
@@ -387,80 +426,23 @@ class AdminApiController extends Controller
                     'id' => (int) $d->id,
                     'registration_number' => $vehiclePlate,
                     'vehicle_type' => $vehicleType,
-                    'vehicle_model' => $vehicleType === 'ALS' ? 'Force Traveller Ambulance 3350' : 'Tata Winger ICU Specialist',
-                    'vehicle_year' => 2024,
+                    'vehicle_model' => $d->vehicle_model ?: '',
+                    'vehicle_year' => $d->vehicle_year ? (int) $d->vehicle_year : null,
                     'operational_status' => $hasActiveTrip ? 'BUSY' : ($d->is_online ? 'AVAILABLE' : 'OFFLINE'),
-                    'equipment_list' => [
-                        'Defibrillator / Monitor (AED)',
-                        'Transport Ventilator with PEEP',
-                        'Multipara Patient Monitor (ECG/SPO2/NIBP)',
-                        'Medical Suction Unit',
-                        'Twin 10L High-Pressure Oxygen System'
-                    ],
+                    'equipment_list' => is_array($d->equipment_list) ? $d->equipment_list : [],
                     'permit_number' => $permitNumber,
                     'insurance_policy' => $insurancePolicy,
-                    'insurance_expiry' => '2027-08-31',
+                    'insurance_expiry' => $d->insurance_expiry_date ?: '',
                 ],
                 'completed_trips_count' => $completedTrips,
                 'total_revenue' => $totalRevenue,
-                'average_rating' => (float) ($d->rating ?: 4.9),
+                'average_rating' => (float) ($d->rating ?? 0.0),
                 'cancellation_rate' => 0.0,
-                'current_latitude' => (float) ($d->lat ?: 11.0318),
-                'current_longitude' => (float) ($d->lng ?: 76.9437),
-                'last_active_at' => ($d->updated_at ?: now())->toIso8601String(),
+                'current_latitude' => $d->lat !== null && (float) $d->lat != 0.0 ? (float) $d->lat : null,
+                'current_longitude' => $d->lng !== null && (float) $d->lng != 0.0 ? (float) $d->lng : null,
+                'last_active_at' => $d->updated_at?->toIso8601String(),
                 'suspension_reason' => null,
-                'documents' => [
-                    [
-                        'id' => (int) $d->id,
-                        'driver_id' => (int) $d->id,
-                        'document_type' => 'DRIVING_LICENCE',
-                        'document_name' => 'Commercial Driving Licence (Front & Back)',
-                        'document_number' => $licenceNumber,
-                        'specification_match' => $licenceNumber,
-                        'file_path' => '/storage/licences/licence_' . $d->id . '.pdf',
-                        'verification_status' => $status,
-                    ],
-                    [
-                        'id' => 100 + (int) $d->id,
-                        'driver_id' => (int) $d->id,
-                        'document_type' => 'VEHICLE_REGISTRATION_RC',
-                        'document_name' => 'Vehicle Registration Certificate (RC)',
-                        'document_number' => $vehiclePlate,
-                        'specification_match' => $vehiclePlate,
-                        'file_path' => '/storage/permits/rc_' . $d->id . '.pdf',
-                        'verification_status' => $status,
-                    ],
-                    [
-                        'id' => 200 + (int) $d->id,
-                        'driver_id' => (int) $d->id,
-                        'document_type' => 'AMBULANCE_OPERATIONAL_PERMIT',
-                        'document_name' => 'Ambulance Operational Permit',
-                        'document_number' => $permitNumber,
-                        'specification_match' => $permitNumber,
-                        'file_path' => '/storage/permits/permit_' . $d->id . '.pdf',
-                        'verification_status' => $status,
-                    ],
-                    [
-                        'id' => 300 + (int) $d->id,
-                        'driver_id' => (int) $d->id,
-                        'document_type' => 'COMMERCIAL_VEHICLE_INSURANCE',
-                        'document_name' => 'Commercial Vehicle Insurance Policy',
-                        'document_number' => $insurancePolicy,
-                        'specification_match' => $insurancePolicy,
-                        'file_path' => '/storage/permits/insurance_' . $d->id . '.pdf',
-                        'verification_status' => $status,
-                    ],
-                    [
-                        'id' => 400 + (int) $d->id,
-                        'driver_id' => (int) $d->id,
-                        'document_type' => 'EMT_CERTIFICATION',
-                        'document_name' => 'Commercial Driver Badge & First Aid Cert',
-                        'document_number' => 'EMT-P-' . (5000 + (int) $d->id),
-                        'specification_match' => 'PARAMEDIC EMT-P',
-                        'file_path' => '/storage/certificates/emt_' . $d->id . '.pdf',
-                        'verification_status' => $status,
-                    ],
-                ],
+                'documents' => $dbDocs,
             ];
         });
 
@@ -696,17 +678,17 @@ class AdminApiController extends Controller
             return [
                 'id' => (int) $h->id,
                 'name' => $h->name,
-                'category' => $h->trauma_level ?: 'Government & Tertiary Trauma Hospital',
-                'address' => $h->address,
+                'category' => $h->trauma_level ?: '',
+                'address' => $h->address ?? '',
                 'latitude' => $h->lat !== null ? (float) $h->lat : null,
                 'longitude' => $h->lng !== null ? (float) $h->lng : null,
-                'phone' => $h->emergency_phone ?: '108',
-                'emergency_contact' => $h->emergency_phone ?: '108',
-                'verified_services' => $h->emergency_services ?: ['24x7 Casualty', 'Level 1 Trauma Care', 'Emergency ICU'],
-                'specialties' => is_array($h->emergency_services) ? $h->emergency_services : ['Emergency ICU', 'Trauma Care'],
+                'phone' => $h->emergency_phone ?: '',
+                'emergency_contact' => $h->emergency_phone ?: '',
+                'verified_services' => is_array($h->emergency_services) ? $h->emergency_services : [],
+                'specialties' => is_array($h->emergency_services) ? $h->emergency_services : [],
                 'verification_status' => $h->verified ? 'VERIFIED' : 'PENDING',
-                'service_zone' => 'Coimbatore Metro & Urban Zone',
-                'has_live_integration' => true,
+                'service_zone' => '',
+                'has_live_integration' => (bool) $h->verified,
             ];
         })->values()->all();
 
@@ -725,13 +707,13 @@ class AdminApiController extends Controller
 
         $name = (string) $request->input('name');
         $slug = 'hosp-' . strtolower(preg_replace('/[^a-zA-Z0-9]/', '-', $name)) . '-' . time();
-        $category = (string) $request->input('category', 'Apex Level 1 Trauma Center');
+        $category = (string) $request->input('category', '');
         $address = (string) $request->input('address');
-        $lat = $request->input('latitude') !== null ? (float) $request->input('latitude') : null;
-        $lng = $request->input('longitude') !== null ? (float) $request->input('longitude') : null;
-        $phone = (string) $request->input('phone', '108');
+        $lat = $request->input('latitude') !== null && $request->input('latitude') !== '' ? (float) $request->input('latitude') : null;
+        $lng = $request->input('longitude') !== null && $request->input('longitude') !== '' ? (float) $request->input('longitude') : null;
+        $phone = (string) $request->input('phone', '');
         $emergencyContact = (string) $request->input('emergency_contact', $phone);
-        $services = (array) $request->input('verified_services', ['24x7 Casualty', 'Level 1 Trauma Care', 'Emergency ICU']);
+        $services = (array) $request->input('verified_services', []);
 
         $hospital = Hospital::create([
             'slug' => $slug,
@@ -743,15 +725,15 @@ class AdminApiController extends Controller
             'emergency_services' => $services,
             'trauma_level' => $category,
             'has_trauma_center' => true,
-            'has_icu_bed' => true,
-            'total_icu_beds' => 30,
-            'available_icu_beds' => 8,
-            'total_general_beds' => 150,
-            'available_general_beds' => 35,
-            'has_cardiac_care' => true,
-            'has_stroke_unit' => true,
-            'has_blood_bank' => true,
-            'operating_hours' => '24x7 Emergency',
+            'has_icu_bed' => false,
+            'total_icu_beds' => (int) $request->input('total_icu_beds', 0),
+            'available_icu_beds' => (int) $request->input('available_icu_beds', 0),
+            'total_general_beds' => (int) $request->input('total_general_beds', 0),
+            'available_general_beds' => (int) $request->input('available_general_beds', 0),
+            'has_cardiac_care' => false,
+            'has_stroke_unit' => false,
+            'has_blood_bank' => false,
+            'operating_hours' => (string) $request->input('operating_hours', ''),
             'verified' => true,
         ]);
 
@@ -765,9 +747,9 @@ class AdminApiController extends Controller
             'phone' => $hospital->emergency_phone,
             'emergency_contact' => $hospital->emergency_phone,
             'verified_services' => $hospital->emergency_services,
-            'specialties' => (array) $request->input('specialties', ['Emergency Trauma Surgery', 'Cardiac Cath Lab']),
+            'specialties' => (array) $request->input('specialties', $services),
             'verification_status' => 'VERIFIED',
-            'service_zone' => (string) $request->input('service_zone', 'Coimbatore Central'),
+            'service_zone' => (string) $request->input('service_zone', ''),
             'has_live_integration' => true,
         ];
 
@@ -790,7 +772,9 @@ class AdminApiController extends Controller
         $activeStatuses = [
             'requested', 'searching', 'assigned', 'accepted',
             'en_route_to_pickup', 'arrived_at_pickup', 'patient_on_board',
-            'en_route_to_hospital', 'arrived_at_hospital', 'finding_ambulance'
+            'en_route_to_hospital', 'arrived_at_hospital', 'finding_ambulance',
+            'driver_assigned', 'driver_approaching', 'driver_arrived',
+            'patient_picked_up', 'patient_onboard', 'in_transit_to_hospital', 'traveling_to_hospital'
         ];
 
         foreach ($allBookings as $b) {
@@ -811,11 +795,11 @@ class AdminApiController extends Controller
 
             return [
                 'id' => (int) $u->id,
-                'name' => $u->name ?: 'Emergency Caller',
-                'email' => $u->email ?: 'citizen_' . $u->id . '@emergency.org',
-                'phone' => $u->phone,
-                'blood_group' => $u->blood_group ?: 'O+',
-                'status' => 'ACTIVE',
+                'name' => $u->name ?: '',
+                'email' => $u->email ?: '',
+                'phone' => $u->phone ?: '',
+                'blood_group' => $u->blood_group ?: '',
+                'status' => strtoupper((string) ($u->status ?: 'ACTIVE')),
                 'bookings_count' => (int) ($phoneCountMap[$key] ?? 0),
                 'has_active_emergency' => !empty($activePhoneMap[$key]),
                 'created_at' => ($u->created_at ?: now())->toIso8601String(),
@@ -828,48 +812,136 @@ class AdminApiController extends Controller
         ]);
     }
 
+    public function toggleUserStatus(Request $request, string $id): JsonResponse
+    {
+        $user = User::find($id);
+        if (!$user) {
+            return response()->json(['success' => false, 'message' => 'User not found.'], 404);
+        }
+
+        $current = strtoupper((string) ($user->status ?: 'ACTIVE'));
+        $nextStatus = strtoupper((string) ($request->input('status') ?: ($current === 'ACTIVE' ? 'SUSPENDED' : 'ACTIVE')));
+
+        if (Schema::hasColumn('users', 'status')) {
+            $user->update(['status' => $nextStatus]);
+        }
+
+        try {
+            AuditLog::create([
+                'admin_id' => self::resolveAdmin($request)?->id,
+                'admin_name' => self::resolveAdmin($request)?->name ?: 'Administrator',
+                'action' => 'USER_STATUS_' . $nextStatus,
+                'entity_type' => 'User',
+                'entity_id' => (string) $user->id,
+                'details' => ['phone' => $user->phone, 'status' => $nextStatus],
+                'ip_address' => $request->ip(),
+            ]);
+        } catch (\Throwable $e) {}
+
+        return response()->json([
+            'success' => true,
+            'status' => $nextStatus,
+            'message' => "User status updated to {$nextStatus}.",
+        ]);
+    }
+
     /**
      * Operational Alerts Feed
      */
     public function alerts(): JsonResponse
     {
+        $states = [];
+        if (Schema::hasTable('admin_alert_states')) {
+            foreach (DB::table('admin_alert_states')->get() as $row) {
+                $states[$row->alert_key] = $row;
+            }
+        }
+
         $alerts = [];
-        $activeEmergency = Booking::whereIn('status', ['searching', 'pending', 'requested', 'failed'])->get();
-        foreach ($activeEmergency as $idx => $b) {
+        $activeEmergency = Booking::whereIn('status', ['searching', 'pending', 'requested', 'finding_ambulance', 'failed'])->get();
+        foreach ($activeEmergency as $b) {
+            $alertKey = 'booking:' . $b->id;
+            $st = $states[$alertKey] ?? null;
+            if ($st && !empty($st->is_resolved)) {
+                continue;
+            }
             $alerts[] = [
-                'id' => $idx + 1,
+                'id' => (int) $b->id,
+                'alert_key' => $alertKey,
                 'alert_code' => 'EMERGENCY_DISPATCH_QUEUE',
                 'severity' => 'CRITICAL',
                 'title' => "Pending Dispatch: " . ($b->booking_reference ?: '#BK-' . $b->id),
-                'message' => "Emergency request by " . ($b->patient_name ?: 'Citizen') . " (" . ($b->callback_phone ?: $b->patient_phone) . ") awaiting paramedic acceptance at " . ($b->pickup_address ?: 'GPS Location'),
+                'message' => "Emergency request by " . ($b->patient_name ?: 'Requester') . " (" . ($b->callback_phone ?: 'No phone') . ") awaiting paramedic acceptance at " . ($b->pickup_address ?: 'GPS Location'),
                 'reference_type' => 'Booking',
                 'reference_id' => $b->id,
-                'is_acknowledged' => false,
+                'is_acknowledged' => $st ? (bool) $st->is_acknowledged : false,
                 'is_resolved' => false,
                 'created_at' => ($b->created_at ?: now())->toIso8601String(),
             ];
         }
 
-        $offlineDrivers = Driver::where('is_online', false)->where('verification_status', 'APPROVED')->count();
+        $offlineDrivers = Driver::where('is_online', false)->where('verification_status', 'approved')->count();
         if ($offlineDrivers > 0) {
-            $alerts[] = [
-                'id' => 999,
-                'alert_code' => 'FLEET_CAPACITY_NOTICE',
-                'severity' => 'WARNING',
-                'title' => "Paramedic Availability Advisory",
-                'message' => "{$offlineDrivers} approved municipal paramedics are currently off duty.",
-                'reference_type' => 'Fleet',
-                'reference_id' => 0,
-                'is_acknowledged' => true,
-                'is_resolved' => false,
-                'created_at' => now()->toIso8601String(),
-            ];
+            $alertKey = 'fleet:offline';
+            $st = $states[$alertKey] ?? null;
+            if (!$st || empty($st->is_resolved)) {
+                $alerts[] = [
+                    'id' => 999999,
+                    'alert_key' => $alertKey,
+                    'alert_code' => 'FLEET_CAPACITY_NOTICE',
+                    'severity' => 'WARNING',
+                    'title' => "Paramedic Availability Advisory",
+                    'message' => "{$offlineDrivers} approved paramedics are currently off duty.",
+                    'reference_type' => 'Fleet',
+                    'reference_id' => 0,
+                    'is_acknowledged' => $st ? (bool) $st->is_acknowledged : false,
+                    'is_resolved' => false,
+                    'created_at' => now()->toIso8601String(),
+                ];
+            }
         }
 
         return response()->json([
             'success' => true,
             'data' => $alerts,
         ]);
+    }
+
+    public function acknowledgeAlert(Request $request, string $id): JsonResponse
+    {
+        $alertKey = ($id === '999999' || $id === '999') ? 'fleet:offline' : ('booking:' . $id);
+        if (Schema::hasTable('admin_alert_states')) {
+            DB::table('admin_alert_states')->updateOrInsert(
+                ['alert_key' => $alertKey],
+                [
+                    'is_acknowledged' => true,
+                    'updated_by' => self::resolveAdmin($request)?->name ?: 'Administrator',
+                    'updated_at' => now(),
+                    'created_at' => now(),
+                ]
+            );
+        }
+
+        return response()->json(['success' => true, 'alert_key' => $alertKey, 'is_acknowledged' => true]);
+    }
+
+    public function resolveAlert(Request $request, string $id): JsonResponse
+    {
+        $alertKey = ($id === '999999' || $id === '999') ? 'fleet:offline' : ('booking:' . $id);
+        if (Schema::hasTable('admin_alert_states')) {
+            DB::table('admin_alert_states')->updateOrInsert(
+                ['alert_key' => $alertKey],
+                [
+                    'is_acknowledged' => true,
+                    'is_resolved' => true,
+                    'updated_by' => self::resolveAdmin($request)?->name ?: 'Administrator',
+                    'updated_at' => now(),
+                    'created_at' => now(),
+                ]
+            );
+        }
+
+        return response()->json(['success' => true, 'alert_key' => $alertKey, 'is_resolved' => true]);
     }
 
     public function broadcastAlert(Request $request): JsonResponse
@@ -946,92 +1018,14 @@ class AdminApiController extends Controller
      */
     private function formatAmbulancesList(): array
     {
-        $dbAmbulances = Ambulance::with('assignedDriver')->get();
-        if ($dbAmbulances->isNotEmpty()) {
-            return $dbAmbulances->map(function (Ambulance $a) {
-                $driver = $a->assignedDriver;
-                $activeBooking = null;
-                if ($driver) {
-                    $activeBooking = Booking::where('driver_id', $driver->id)
-                        ->whereNotIn('status', ['trip_completed', 'completed', 'cancelled'])
-                        ->orderByDesc('accepted_at')
-                        ->first();
-                }
-
-                $operationalStatus = strtoupper($a->status ?: 'AVAILABLE');
-                if ($activeBooking) {
-                    $operationalStatus = 'BUSY';
-                } elseif ($driver && !$driver->is_online) {
-                    $operationalStatus = 'OFFLINE';
-                }
-
-                $lat = (float) ($driver ? ($driver->lat ?: $a->lat) : $a->lat);
-                $lng = (float) ($driver ? ($driver->lng ?: $a->lng) : $a->lng);
-                $speed = (float) ($driver ? ($driver->speed ?: $a->speed) : $a->speed);
-                $heading = (float) ($driver ? ($driver->heading ?: $a->heading) : $a->heading);
-
-                return [
-                    'id' => (int) $a->id,
-                    'registration_number' => $a->registration_number,
-                    'vehicle_type' => strtoupper($a->vehicle_type ?: 'ALS'),
-                    'operator_name' => $a->hospital_affiliation ?: 'Government 108 Emergency Fleet',
-                    'primary_driver_id' => $driver ? (int) $driver->id : null,
-                    'equipment_capabilities' => is_array($a->equipment_list) ? $a->equipment_list : [
-                        'Transport Ventilator',
-                        'Defibrillator / AED',
-                        'Oxygen Regulators',
-                        'Spine Board & Foldable Stretcher',
-                        'Multipara Cardiac Monitor',
-                    ],
-                    'verification_status' => 'APPROVED',
-                    'fitness_expiry' => '2027-11-13',
-                    'insurance_expiry' => '2027-11-13',
-                    'permit_expiry' => '2027-11-13',
-                    'operational_status' => $operationalStatus,
-                    'latitude' => $lat,
-                    'longitude' => $lng,
-                    'speed_kmh' => $speed,
-                    'heading' => $heading,
-                    'last_gps_ping_at' => now()->toIso8601String(),
-                    'seconds_since_ping' => 2,
-                    'is_gps_stale' => false,
-                    'battery_fuel_percentage' => 92,
-                    'service_zone' => 'Coimbatore Urban District',
-                    'primary_driver' => $driver ? [
-                        'id' => (int) $driver->id,
-                        'name' => $driver->name,
-                        'phone' => $driver->phone,
-                        'online_status' => $driver->is_online ? 'ONLINE' : 'OFFLINE',
-                        'rating' => (float) ($driver->rating ?: 5.0),
-                    ] : null,
-                    'active_trip' => $activeBooking ? [
-                        'booking_id' => (int) $activeBooking->id,
-                        'booking_reference' => $activeBooking->booking_reference ?: '#BK-' . $activeBooking->id,
-                        'user_name' => $activeBooking->patient_name ?: 'Emergency Caller',
-                        'user_phone' => $activeBooking->callback_phone ?: '',
-                        'driver_name' => $driver ? $driver->name : 'Pilot',
-                        'driver_phone' => $driver && $driver->phone ? $driver->phone : null,
-                        'severity' => strtoupper((string) ($activeBooking->emergency_category ?: 'CRITICAL')),
-                        'status' => $this->normalizeBookingStatusForAdmin($activeBooking->status),
-                        'pickup_address' => $activeBooking->pickup_address,
-                        'pickup_lat' => (float) $activeBooking->pickup_lat,
-                        'pickup_lng' => (float) $activeBooking->pickup_lng,
-                        'hospital_name' => is_array($activeBooking->destination_hospital) ? ($activeBooking->destination_hospital['name'] ?? 'CMCH 108 Trauma Center') : 'Emergency Hospital',
-                        'hospital_lat' => (float) ($activeBooking->destination_latitude ?: 11.0015),
-                        'hospital_lng' => (float) ($activeBooking->destination_longitude ?: 76.9695),
-                    ] : null,
-                ];
-            })->values()->all();
-        }
-
-        return Driver::all()->map(function (Driver $d) {
+        $items = Driver::all()->map(function (Driver $d) {
             $activeBooking = Booking::where('driver_id', $d->id)
                 ->whereNotIn('status', ['trip_completed', 'completed', 'cancelled'])
                 ->orderByDesc('accepted_at')
                 ->first();
 
-            $lat = $d->lat !== null ? (float) $d->lat : null;
-            $lng = $d->lng !== null ? (float) $d->lng : null;
+            $lat = $d->lat !== null && (float) $d->lat != 0.0 ? (float) $d->lat : null;
+            $lng = $d->lng !== null && (float) $d->lng != 0.0 ? (float) $d->lng : null;
             $speed = (float) ($d->speed ?: 0.0);
             $heading = (float) ($d->heading ?: 0.0);
 
@@ -1040,70 +1034,116 @@ class AdminApiController extends Controller
                 $operationalStatus = 'BUSY';
             } elseif (!$d->is_online) {
                 $operationalStatus = 'OFFLINE';
-            } else {
-                $operationalStatus = 'AVAILABLE';
             }
+
+            $secSincePing = $d->updated_at ? max(0, now()->diffInSeconds($d->updated_at)) : null;
 
             return [
                 'id' => (int) $d->id,
                 'registration_number' => $d->vehicle_plate ?: ($d->vehicle_number ?: ''),
                 'vehicle_type' => strtoupper((string) ($d->vehicle_type ?: 'ALS')),
-                'operator_name' => $d->operator_affiliation ?: 'Government 108 Emergency Fleet',
+                'operator_name' => $d->operator_affiliation ?: '',
                 'primary_driver_id' => (int) $d->id,
-                'equipment_capabilities' => is_array($d->equipment_list) ? $d->equipment_list : [
-                    'Transport Ventilator',
-                    'Defibrillator / AED',
-                    'Oxygen Regulators',
-                    'Spine Board & Foldable Stretcher',
-                    'Multipara Cardiac Monitor',
-                ],
-                'verification_status' => strtoupper((string) ($d->verification_status ?: 'APPROVED')),
-                'fitness_expiry' => '2027-11-13',
-                'insurance_expiry' => '2027-11-13',
-                'permit_expiry' => '2027-11-13',
+                'equipment_capabilities' => is_array($d->equipment_list) ? $d->equipment_list : [],
+                'verification_status' => strtoupper((string) ($d->verification_status ?: 'PENDING')),
+                'fitness_expiry' => '',
+                'insurance_expiry' => $d->insurance_expiry_date ?: '',
+                'permit_expiry' => $d->permit_expiry_date ?: '',
                 'operational_status' => $operationalStatus,
                 'latitude' => $lat,
                 'longitude' => $lng,
                 'speed_kmh' => $speed,
                 'heading' => $heading,
-                'last_gps_ping_at' => now()->toIso8601String(),
-                'seconds_since_ping' => 2,
-                'is_gps_stale' => false,
-                'battery_fuel_percentage' => 92,
-                'service_zone' => 'Coimbatore Urban District',
+                'last_gps_ping_at' => $d->updated_at?->toIso8601String(),
+                'seconds_since_ping' => $secSincePing,
+                'is_gps_stale' => $lat === null || $lng === null || ($secSincePing !== null && $secSincePing > 120),
+                'battery_fuel_percentage' => null,
+                'service_zone' => '',
                 'primary_driver' => [
                     'id' => (int) $d->id,
                     'name' => $d->name,
                     'phone' => $d->phone,
                     'online_status' => $d->is_online ? 'ONLINE' : 'OFFLINE',
-                    'rating' => (float) ($d->rating ?: 0.0),
+                    'rating' => (float) ($d->rating ?? 0.0),
                 ],
                 'active_trip' => $activeBooking ? [
                     'booking_id' => (int) $activeBooking->id,
                     'booking_reference' => $activeBooking->booking_reference ?: '#BK-' . $activeBooking->id,
-                    'user_name' => $activeBooking->patient_name ?: 'Emergency Caller',
+                    'user_name' => $activeBooking->patient_name ?: '',
                     'user_phone' => $activeBooking->callback_phone ?: '',
                     'driver_name' => $d->name,
                     'driver_phone' => $d->phone,
                     'severity' => strtoupper((string) ($activeBooking->emergency_category ?: 'CRITICAL')),
                     'status' => $this->normalizeBookingStatusForAdmin($activeBooking->status),
-                    'pickup_address' => $activeBooking->pickup_address,
+                    'pickup_address' => $activeBooking->pickup_address ?: '',
                     'pickup_lat' => (float) $activeBooking->pickup_lat,
                     'pickup_lng' => (float) $activeBooking->pickup_lng,
-                    'hospital_name' => is_array($activeBooking->destination_hospital) ? ($activeBooking->destination_hospital['name'] ?? 'CMCH 108 Trauma Center') : 'Emergency Hospital',
-                    'hospital_lat' => (float) ($activeBooking->destination_latitude ?: 11.0015),
-                    'hospital_lng' => (float) ($activeBooking->destination_longitude ?: 76.9695),
+                    'hospital_name' => is_array($activeBooking->destination_hospital) ? ($activeBooking->destination_hospital['name'] ?? ($activeBooking->destination_address ?: '')) : ($activeBooking->destination_address ?: ''),
+                    'hospital_lat' => abs((float) $activeBooking->destination_latitude) > 0.0001 ? (float) $activeBooking->destination_latitude : null,
+                    'hospital_lng' => abs((float) $activeBooking->destination_longitude) > 0.0001 ? (float) $activeBooking->destination_longitude : null,
                 ] : null,
             ];
         })->values()->all();
+
+        $knownPlates = [];
+        foreach ($items as $it) {
+            if (!empty($it['registration_number'])) {
+                $knownPlates[strtoupper(trim($it['registration_number']))] = true;
+            }
+        }
+
+        foreach (Ambulance::with('assignedDriver')->get() as $a) {
+            $plate = strtoupper(trim((string) $a->registration_number));
+            if ($plate !== '' && isset($knownPlates[$plate])) {
+                continue;
+            }
+            $driver = $a->assignedDriver;
+            if ($driver && Driver::where('id', $driver->id)->exists()) {
+                continue;
+            }
+
+            $lat = $a->lat !== null && (float) $a->lat != 0.0 ? (float) $a->lat : null;
+            $lng = $a->lng !== null && (float) $a->lng != 0.0 ? (float) $a->lng : null;
+            $pingAt = $a->last_telemetry_at ?? $a->updated_at;
+            $secSincePing = $pingAt ? max(0, now()->diffInSeconds($pingAt)) : null;
+
+            $items[] = [
+                'id' => 10000 + (int) $a->id,
+                'registration_number' => $a->registration_number,
+                'vehicle_type' => strtoupper($a->vehicle_type ?: 'ALS'),
+                'operator_name' => $a->hospital_affiliation ?: '',
+                'primary_driver_id' => null,
+                'equipment_capabilities' => is_array($a->equipment_list) ? $a->equipment_list : [],
+                'verification_status' => 'APPROVED',
+                'fitness_expiry' => '',
+                'insurance_expiry' => '',
+                'permit_expiry' => '',
+                'operational_status' => strtoupper($a->status ?: 'AVAILABLE'),
+                'latitude' => $lat,
+                'longitude' => $lng,
+                'speed_kmh' => (float) ($a->speed ?: 0.0),
+                'heading' => (float) ($a->heading ?: 0.0),
+                'last_gps_ping_at' => $pingAt?->toIso8601String(),
+                'seconds_since_ping' => $secSincePing,
+                'is_gps_stale' => $lat === null || $lng === null || ($secSincePing !== null && $secSincePing > 120),
+                'battery_fuel_percentage' => null,
+                'service_zone' => '',
+                'primary_driver' => null,
+                'active_trip' => null,
+            ];
+        }
+
+        return $items;
     }
 
     private function formatBookingForAdmin(Booking $b): array
     {
         $hosp = is_array($b->destination_hospital) ? $b->destination_hospital : [];
-        $hospName = $hosp['name'] ?? ($b->destination_address ?: 'Government CMCH 108 Hospital');
-        $hospLat = (float) ($hosp['lat'] ?? $b->destination_latitude ?: 11.0015);
-        $hospLng = (float) ($hosp['lng'] ?? $b->destination_longitude ?: 76.9695);
+        $hospName = $hosp['name'] ?? ($b->destination_address ?: '');
+        $rawHospLat = (float) ($hosp['lat'] ?? $b->destination_latitude ?: 0.0);
+        $rawHospLng = (float) ($hosp['lng'] ?? $b->destination_longitude ?: 0.0);
+        $hospLat = abs($rawHospLat) > 0.0001 ? $rawHospLat : null;
+        $hospLng = abs($rawHospLng) > 0.0001 ? $rawHospLng : null;
 
         $driver = $b->relationLoaded('driver') ? $b->driver : ($b->driver_id ? Driver::find($b->driver_id) : null);
 
@@ -1118,34 +1158,34 @@ class AdminApiController extends Controller
         }
         $rawPhone = preg_replace('/[^0-9]/', '', (string) $b->callback_phone);
         $phone10 = strlen($rawPhone) >= 10 ? substr($rawPhone, -10) : $rawPhone;
-        $matchedUserId = $userPhoneMap[$phone10] ?? 1;
+        $matchedUserId = $userPhoneMap[$phone10] ?? null;
 
         return [
             'id' => (int) $b->id,
             'booking_reference' => $b->booking_reference ?: '#BK-' . $b->id,
             'user_id' => $matchedUserId,
-            'requester_name' => $b->patient_name ?: 'Emergency Caller (SIM Verified)',
+            'requester_name' => $b->patient_name ?: '',
             'requester_phone' => $b->callback_phone ?: '',
-            'patient_name' => $b->patient_name ?: 'Emergency Patient',
+            'patient_name' => $b->patient_name ?: '',
             'patient_age' => null,
-            'patient_gender' => 'Emergency Patient',
+            'patient_gender' => '',
             'severity' => strtoupper((string) ($b->emergency_category ?: 'CRITICAL')),
-            'chief_complaint' => $b->notes ?: ($b->essential_instructions ?: 'Urgent 108 medical response required'),
-            'pickup_address' => $b->pickup_address,
+            'chief_complaint' => $b->notes ?: ($b->essential_instructions ?: ''),
+            'pickup_address' => $b->pickup_address ?: '',
             'pickup_latitude' => (float) $b->pickup_lat,
             'pickup_longitude' => (float) $b->pickup_lng,
-            'hospital_id' => 1,
+            'hospital_id' => null,
             'hospital' => [
-                'id' => 1,
+                'id' => $hosp['id'] ?? null,
                 'name' => $hospName,
-                'address' => $b->destination_address ?: 'Trichy Road, Coimbatore',
+                'address' => $b->destination_address ?: '',
                 'latitude' => $hospLat,
                 'longitude' => $hospLng,
-                'phone' => '108',
-                'emergency_contact' => '108',
-                'verified_services' => ['Level 1 Trauma Care', '24x7 Casualty'],
+                'phone' => '',
+                'emergency_contact' => '',
+                'verified_services' => [],
                 'verification_status' => 'VERIFIED',
-                'service_zone' => 'Coimbatore Urban',
+                'service_zone' => '',
                 'has_live_integration' => true,
             ],
             'driver_id' => $driver ? (int) $driver->id : null,
@@ -1153,14 +1193,14 @@ class AdminApiController extends Controller
                 'id' => (int) $driver->id,
                 'full_name' => $driver->name,
                 'phone' => $driver->phone,
-                'licence_number' => $driver->license_number ?: 'DL-' . $driver->id,
-                'verification_status' => 'APPROVED',
+                'licence_number' => $driver->license_number ?: '',
+                'verification_status' => strtoupper((string) ($driver->verification_status ?: 'PENDING')),
                 'online_status' => $driver->is_online ? 'ONLINE' : 'OFFLINE',
-                'operational_status' => 'ON_TRIP',
-                'completed_trips_count' => (int) ($driver->total_trips ?: 0),
-                'average_rating' => (float) ($driver->rating ?: 0.0),
-                'current_latitude' => $driver->lat !== null ? (float) $driver->lat : null,
-                'current_longitude' => $driver->lng !== null ? (float) $driver->lng : null,
+                'operational_status' => $this->normalizeBookingStatusForAdmin($b->status),
+                'completed_trips_count' => (int) ($driver->total_trips ?? 0),
+                'average_rating' => (float) ($driver->rating ?? 0.0),
+                'current_latitude' => $driver->lat !== null && (float) $driver->lat != 0.0 ? (float) $driver->lat : null,
+                'current_longitude' => $driver->lng !== null && (float) $driver->lng != 0.0 ? (float) $driver->lng : null,
             ] : null,
             'ambulance_id' => $driver ? (int) $driver->id : null,
             'ambulance' => $driver ? [
@@ -1168,25 +1208,27 @@ class AdminApiController extends Controller
                 'registration_number' => $driver->vehicle_plate ?: ($driver->vehicle_number ?: ''),
                 'vehicle_type' => strtoupper((string) ($driver->vehicle_type ?: 'ALS')),
                 'operational_status' => 'BUSY',
-                'latitude' => $driver->lat !== null ? (float) $driver->lat : null,
-                'longitude' => $driver->lng !== null ? (float) $driver->lng : null,
+                'latitude' => $driver->lat !== null && (float) $driver->lat != 0.0 ? (float) $driver->lat : null,
+                'longitude' => $driver->lng !== null && (float) $driver->lng != 0.0 ? (float) $driver->lng : null,
                 'speed_kmh' => (float) ($driver->speed ?: 0.0),
                 'heading' => (float) ($driver->heading ?: 0.0),
             ] : null,
             'status' => $this->normalizeBookingStatusForAdmin($b->status),
             'distance_km' => (float) ($b->distance_km ?: 0.0),
             'eta_minutes' => (int) ($b->eta_minutes ?: 0),
-            'requested_at' => ($b->created_at ?: now())->toIso8601String(),
+            'duration_minutes' => (int) ($b->duration_minutes ?: 0),
+            'total_fare' => (float) ($b->earnings ?: 0.0),
+            'requested_at' => $b->created_at?->toIso8601String(),
             'dispatched_at' => $b->accepted_at?->toIso8601String(),
             'accepted_at' => $b->accepted_at?->toIso8601String(),
             'arrived_pickup_at' => $b->arrived_pickup_at?->toIso8601String(),
             'patient_onboard_at' => $b->patient_picked_up_at?->toIso8601String(),
-            'arrived_hospital_at' => in_array($b->status, ['arrived_at_hospital', 'trip_completed', 'completed']) ? ($b->completed_at ? $b->completed_at->subMinutes(4)->toIso8601String() : now()->toIso8601String()) : null,
+            'arrived_hospital_at' => in_array($b->status, ['arrived_at_hospital', 'trip_completed', 'completed']) ? ($b->completed_at ?: $b->updated_at)?->toIso8601String() : null,
             'completed_at' => $b->completed_at?->toIso8601String(),
-            'cancelled_at' => $b->status === 'cancelled' ? ($b->updated_at ?: now())->toIso8601String() : null,
+            'cancelled_at' => $b->status === 'cancelled' ? $b->updated_at?->toIso8601String() : null,
             'cancellation_reason' => $b->cancel_reason,
-            'cancelled_by_type' => stripos((string) $b->cancel_reason, 'admin') !== false ? 'ADMIN' : 'USER',
-            'operational_notes' => $b->handover_notes ?: 'Automated LifeRoute Dispatch Protocol Synchronized.',
+            'cancelled_by_type' => stripos((string) $b->cancel_reason, 'admin') !== false ? 'ADMIN' : ($b->status === 'cancelled' ? 'USER' : null),
+            'operational_notes' => $b->handover_notes ?: '',
             'events' => $this->generateBookingTimelineEvents($b),
         ];
     }
@@ -1211,70 +1253,83 @@ class AdminApiController extends Controller
     private function generateBookingTimelineEvents(Booking $b): array
     {
         $events = [];
-        $t = $b->created_at ?: now();
 
-        $events[] = [
-            'id' => 1,
-            'booking_id' => (int) $b->id,
-            'event_type' => 'REQUESTED',
-            'description' => "Emergency call placed by {$b->patient_name} ({$b->callback_phone}). Pickup: {$b->pickup_address}.",
-            'actor_type' => 'CITIZEN',
-            'created_at' => $t->toIso8601String(),
-        ];
+        if ($b->created_at) {
+            $events[] = [
+                'id' => 1,
+                'booking_id' => (int) $b->id,
+                'event_type' => 'REQUESTED',
+                'description' => "Emergency request placed by " . ($b->patient_name ?: 'Requester') . ($b->callback_phone ? " ({$b->callback_phone})" : '') . ". Pickup: {$b->pickup_address}.",
+                'actor_type' => 'CITIZEN',
+                'created_at' => $b->created_at->toIso8601String(),
+            ];
+        }
 
-        if ($b->driver_id) {
+        if ($b->driver_id && $b->accepted_at) {
             $events[] = [
                 'id' => 2,
                 'booking_id' => (int) $b->id,
                 'event_type' => 'DISPATCHED',
-                'description' => "Assigned to Ambulance Unit #{$b->driver_id} (Driver: {$b->driver?->name}).",
+                'description' => "Assigned to Driver #{$b->driver_id} ({$b->driver?->name}).",
                 'actor_type' => 'DISPATCHER',
-                'created_at' => ($b->accepted_at ?: $t->addSeconds(12))->toIso8601String(),
+                'created_at' => $b->accepted_at->toIso8601String(),
             ];
         }
 
-        if (in_array($b->status, ['driver_arrived', 'arrived_at_pickup', 'patient_picked_up', 'traveling_to_hospital', 'arrived_at_hospital', 'trip_completed', 'completed'])) {
-            $events[] = [
-                'id' => 3,
-                'booking_id' => (int) $b->id,
-                'event_type' => 'ARRIVED_AT_PICKUP',
-                'description' => 'Ambulance arrived at patient emergency pickup address.',
-                'actor_type' => 'PARAMEDIC',
-                'created_at' => ($b->arrived_pickup_at ?: $t->addMinutes(4))->toIso8601String(),
-            ];
+        if ($b->arrived_pickup_at || in_array($b->status, ['driver_arrived', 'arrived_at_pickup', 'patient_picked_up', 'patient_onboard', 'traveling_to_hospital', 'in_transit_to_hospital', 'arrived_at_hospital', 'trip_completed', 'completed'], true)) {
+            $ts = $b->arrived_pickup_at ?? $b->patient_picked_up_at ?? $b->updated_at ?? $b->created_at;
+            if ($ts) {
+                $events[] = [
+                    'id' => 3,
+                    'booking_id' => (int) $b->id,
+                    'event_type' => 'ARRIVED_AT_PICKUP',
+                    'description' => 'Ambulance arrived at pickup location.',
+                    'actor_type' => 'PARAMEDIC',
+                    'created_at' => $ts->toIso8601String(),
+                ];
+            }
         }
 
-        if (in_array($b->status, ['patient_picked_up', 'traveling_to_hospital', 'arrived_at_hospital', 'trip_completed', 'completed'])) {
-            $events[] = [
-                'id' => 4,
-                'booking_id' => (int) $b->id,
-                'event_type' => 'PATIENT_ON_BOARD',
-                'description' => 'Patient stabilized and loaded onboard ambulance. En route to receiving hospital.',
-                'actor_type' => 'PARAMEDIC',
-                'created_at' => ($b->patient_picked_up_at ?: $t->addMinutes(7))->toIso8601String(),
-            ];
+        if ($b->patient_picked_up_at || in_array($b->status, ['patient_picked_up', 'patient_onboard', 'traveling_to_hospital', 'in_transit_to_hospital', 'arrived_at_hospital', 'trip_completed', 'completed'], true)) {
+            $ts = $b->patient_picked_up_at ?? $b->updated_at ?? $b->created_at;
+            if ($ts) {
+                $events[] = [
+                    'id' => 4,
+                    'booking_id' => (int) $b->id,
+                    'event_type' => 'PATIENT_ON_BOARD',
+                    'description' => 'Patient loaded onboard ambulance.',
+                    'actor_type' => 'PARAMEDIC',
+                    'created_at' => $ts->toIso8601String(),
+                ];
+            }
         }
 
-        if (in_array($b->status, ['trip_completed', 'completed'])) {
-            $events[] = [
-                'id' => 5,
-                'booking_id' => (int) $b->id,
-                'event_type' => 'COMPLETED',
-                'description' => 'Patient successfully handed over to Hospital Emergency Casualty Triage Bay.',
-                'actor_type' => 'HOSPITAL',
-                'created_at' => ($b->completed_at ?: $t->addMinutes(18))->toIso8601String(),
-            ];
+        if ($b->completed_at || in_array($b->status, ['trip_completed', 'completed'], true)) {
+            $ts = $b->completed_at ?? $b->updated_at;
+            if ($ts) {
+                $events[] = [
+                    'id' => 5,
+                    'booking_id' => (int) $b->id,
+                    'event_type' => 'COMPLETED',
+                    'description' => 'Patient handover completed at receiving hospital.',
+                    'actor_type' => 'HOSPITAL',
+                    'created_at' => $ts->toIso8601String(),
+                ];
+            }
         }
 
         if ($b->status === 'cancelled') {
-            $events[] = [
-                'id' => 6,
-                'booking_id' => (int) $b->id,
-                'event_type' => 'CANCELLED',
-                'description' => 'Emergency run cancelled: ' . ($b->cancel_reason ?: 'User cancelled request'),
-                'actor_type' => 'DISPATCHER',
-                'created_at' => ($b->updated_at ?: now())->toIso8601String(),
-            ];
+            $ts = $b->updated_at ?? $b->created_at;
+            if ($ts) {
+                $events[] = [
+                    'id' => 6,
+                    'booking_id' => (int) $b->id,
+                    'event_type' => 'CANCELLED',
+                    'description' => 'Emergency run cancelled' . ($b->cancel_reason ? ': ' . $b->cancel_reason : '.'),
+                    'actor_type' => 'DISPATCHER',
+                    'created_at' => $ts->toIso8601String(),
+                ];
+            }
         }
 
         return $events;

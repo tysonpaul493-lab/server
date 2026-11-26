@@ -16,6 +16,7 @@ class User extends Authenticatable
         'phone',
         'blood_group',
         'emergency_notes',
+        'status',
         'email',
         'password',
         'remember_token',
@@ -61,8 +62,9 @@ class User extends Authenticatable
             'id' => $this->public_id ?: (string) $this->id,
             'name' => $this->name ?? '',
             'phone' => $this->phone ?? '',
-            'blood_group' => $this->blood_group ?? 'O+',
+            'blood_group' => $this->blood_group ?? '',
             'emergency_notes' => $this->emergency_notes ?? '',
+            'status' => $this->status ?? 'ACTIVE',
         ];
     }
 }

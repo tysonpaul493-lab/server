@@ -88,22 +88,20 @@ class Driver extends Model
             'emergency_contact' => $this->emergency_contact ?? '',
             'license_number' => $this->license_number ?? '',
             'license_expiry_date' => $this->license_expiry_date ?? '',
-            'rating' => (float) ($this->rating ?? 4.95),
+            'rating' => (float) ($this->rating ?? 0.0),
             'total_trips' => (int) ($this->total_trips ?? 0),
             'completed_trips_count' => (int) ($this->total_trips ?? 0),
             'is_online' => (bool) $this->is_online,
-            'verification_status' => $this->verification_status ?: 'approved',
+            'verification_status' => $this->verification_status ?: 'pending',
             'documents_uploaded' => $this->resolveDocumentsUploaded(),
             'assigned_vehicle' => [
                 'id' => (int) $this->id,
                 'registration_number' => $this->vehicle_plate ?: ($this->vehicle_number ?: ''),
                 'vehicle_type' => $normalizedType,
-                'make_model' => $this->vehicle_model ?: 'Ambulance Unit',
-                'year' => (int) ($this->vehicle_year ?: 2024),
-                'equipment_list' => is_array($this->equipment_list) && count($this->equipment_list) > 0
-                    ? $this->equipment_list
-                    : ['Oxygen Cylinder & Regulators', 'Emergency Trauma Kit', 'Stretcher & Spine Board'],
-                'operator_affiliation' => $this->operator_affiliation ?: 'Emergency Ambulance Fleet',
+                'make_model' => $this->vehicle_model ?: '',
+                'year' => $this->vehicle_year ? (int) $this->vehicle_year : null,
+                'equipment_list' => is_array($this->equipment_list) ? $this->equipment_list : [],
+                'operator_affiliation' => $this->operator_affiliation ?: '',
                 'permit_number' => $this->permit_number ?: '',
                 'permit_expiry_date' => $this->permit_expiry_date ?: '',
                 'insurance_policy_number' => $this->insurance_policy_number ?: '',
@@ -142,12 +140,12 @@ class Driver extends Model
             'phone' => $this->phone ?? '',
             'ambulance_number' => $this->vehicle_plate ?: ($this->vehicle_number ?: ''),
             'ambulance_type' => self::normalizeVehicleType($this->vehicle_type),
-            'rating' => (float) ($this->rating ?? 5.0),
+            'rating' => (float) ($this->rating ?? 0.0),
             'total_trips' => (int) ($this->total_trips ?? 0),
             'current_lat' => (float) $this->lat,
             'current_lng' => (float) $this->lng,
             'heading' => (float) $this->heading,
-            'last_location_update' => now()->toIso8601String(),
+            'last_location_update' => $this->updated_at?->toIso8601String(),
         ];
     }
 }

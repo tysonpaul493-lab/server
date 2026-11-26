@@ -70,8 +70,11 @@ foreach (['/api', '/api/v1', ''] as $prefix) {
         Route::get('/hospitals', [AdminApiController::class, 'hospitals']);
         Route::post('/hospitals', [AdminApiController::class, 'addHospital']);
         Route::get('/users', [AdminApiController::class, 'users']);
+        Route::post('/users/{id}/toggle-status', [AdminApiController::class, 'toggleUserStatus']);
         Route::get('/alerts', [AdminApiController::class, 'alerts']);
         Route::post('/alerts/broadcast', [AdminApiController::class, 'broadcastAlert']);
+        Route::post('/alerts/{id}/acknowledge', [AdminApiController::class, 'acknowledgeAlert']);
+        Route::post('/alerts/{id}/resolve', [AdminApiController::class, 'resolveAlert']);
         Route::get('/audit-logs', [AdminApiController::class, 'auditLogs']);
     });
 }
