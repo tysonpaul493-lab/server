@@ -13,12 +13,13 @@ class WebSocketBroadcaster
         }
 
         $channelList = is_array($channels) ? array_values($channels) : [$channels];
+        $host = (string) config('liferoute.ws_internal_host', '127.0.0.1');
         $port = (int) config('liferoute.ws_internal_port', 8081);
 
         try {
             Http::timeout(1)
                 ->connectTimeout(1)
-                ->post("http://127.0.0.1:{$port}/broadcast", [
+                ->post("http://{$host}:{$port}/broadcast", [
                     'channels' => $channelList,
                     'event' => $eventName,
                     'payload' => $payload,
@@ -34,10 +35,11 @@ class WebSocketBroadcaster
             return 0;
         }
 
+        $host = (string) config('liferoute.ws_internal_host', '127.0.0.1');
         $port = (int) config('liferoute.ws_internal_port', 8081);
 
         try {
-            $resp = Http::timeout(1)->connectTimeout(1)->get("http://127.0.0.1:{$port}/stats");
+            $resp = Http::timeout(1)->connectTimeout(1)->get("http://{$host}:{$port}/stats");
             if ($resp->successful()) {
                 return (int) ($resp->json('connected_ws_clients') ?? 0);
             }

@@ -20,7 +20,7 @@ use React\Socket\SocketServer;
 
 class WebSocketServeCommand extends Command
 {
-    protected $signature = 'websocket:serve {--host=0.0.0.0} {--port=8080} {--internal-port=8081}';
+    protected $signature = 'websocket:serve {--host=0.0.0.0} {--port=8080} {--internal-host=127.0.0.1} {--internal-port=8081}';
     protected $description = 'Run the LifeRoute Pusher/Reverb-compatible PHP WebSocket server';
 
     /** @var array<int, array{conn: ConnectionInterface, channels: array<string, bool>, upgraded: bool, buffer: string, wsBuffer: ?MessageBuffer, socket_id: string}> */
@@ -30,6 +30,7 @@ class WebSocketServeCommand extends Command
     {
         $host = (string) $this->option('host');
         $port = (int) $this->option('port');
+        $internalHost = (string) ($this->option('internal-host') ?: config('liferoute.ws_internal_host', '127.0.0.1'));
         $internalPort = (int) $this->option('internal-port');
 
         $loop = Loop::get();
@@ -151,11 +152,11 @@ class WebSocketServeCommand extends Command
             return Response::json(['status' => 'not_found'], 404);
         });
 
-        $internalSocket = new SocketServer("127.0.0.1:{$internalPort}", [], $loop);
+        $internalSocket = new SocketServer("{$internalHost}:{$internalPort}", [], $loop);
         $internalHttp->listen($internalSocket);
 
         $this->info("LifeRoute PHP WebSocket Server listening on ws://{$host}:{$port}");
-        $this->info("Internal broadcast bridge listening on http://127.0.0.1:{$internalPort}");
+        $this->info("Internal broadcast bridge listening on http://{$internalHost}:{$internalPort}");
 
         $loop->run();
 

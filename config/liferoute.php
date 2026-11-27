@@ -3,6 +3,7 @@
 return [
     'ws_host' => env('WS_HOST', '0.0.0.0'),
     'ws_port' => (int) env('WS_PORT', 8080),
+    'ws_internal_host' => env('WS_INTERNAL_HOST', '127.0.0.1'),
     'ws_internal_port' => (int) env('WS_INTERNAL_PORT', 8081),
     'reverb_app_key' => env('REVERB_APP_KEY', 'liferoute_reverb_key'),
     'reverb_app_secret' => env('REVERB_APP_SECRET', 'liferoute_emergency_ws_secret_2026'),
